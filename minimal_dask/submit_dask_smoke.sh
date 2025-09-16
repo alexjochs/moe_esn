@@ -17,6 +17,12 @@ cd "$SUBMIT_DIR"
 
 module purge
 module load python/3.12 || true
+module load slurm || module load slurm/slurm || true
+
+if ! command -v sbatch >/dev/null 2>&1; then
+  echo "sbatch command not available in PATH; load the appropriate Slurm module." >&2
+  exit 2
+fi
 
 VENV_DIR=${VENV_DIR:-"$SUBMIT_DIR/.venv"}
 if [ ! -d "$VENV_DIR" ]; then
