@@ -395,27 +395,25 @@ def _start_dask_cluster(args, outdir: Path):
     log_dir.mkdir(parents=True, exist_ok=True)
     local_dir = Path(os.environ.get('TMPDIR', '/tmp'))
 
-    env_extra = [
+    job_script_prologue = [
         'export OMP_NUM_THREADS=1',
         'export OPENBLAS_NUM_THREADS=1',
         'export MKL_NUM_THREADS=1',
         'export VECLIB_MAXIMUM_THREADS=1',
         'export NUMEXPR_NUM_THREADS=1',
     ]
-
-    job_script_prologue = []
     venv_path = os.environ.get('VIRTUAL_ENV')
     if venv_path:
-        job_script_prologue.append(f"source {venv_path}/bin/activate")
+        job_script_prologue.insert(0, f"source {venv_path}/bin/activate")
 
     print(
         f"[Dask] Starting cluster: jobs={jobs} cores/job={worker_cores} mem/job={worker_mem} "
         f"queue={queue} account={account}"
     )
 
-    job_extra = []
+    job_extra_directives = []
     if preempt_requeue:
-        job_extra.append('--requeue')
+        job_extra_directives.append('--requeue')
 
     cluster = SLURMCluster(
         queue=queue,
@@ -428,8 +426,7 @@ def _start_dask_cluster(args, outdir: Path):
         local_directory=str(local_dir),
         log_directory=str(log_dir),
         job_script_prologue=job_script_prologue,
-        env_extra=env_extra,
-        job_extra=job_extra,
+        job_extra_directives=job_extra_directives,
     )
 
     desired_jobs = jobs
@@ -455,7 +452,7 @@ def _evaluate_chunk(genomes, seeds, worker_cores):
 
     max_workers = max(1, min(worker_cores, len(genomes)))
     results = [1e6] * len(genomes)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_map = {
             pool.submit(_eval_genome_multi_seed, genome, seeds): idx
             for idx, genome in enumerate(genomes)
