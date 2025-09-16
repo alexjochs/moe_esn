@@ -22,24 +22,19 @@
 # --------------------------
 
 # -------- Parameters via environment or defaults --------
-PYFILE=${PYFILE:-}
 OUTDIR=${OUTDIR:-$PWD/runs}
 TAG=${TAG:-ga-$(date +%Y%m%d-%H%M%S)}
 POP=${POP:-60}
 GENS=${GENS:-120}
 SEEDS_ENV=${SEEDS:-"42 1337 2025 1962"}
 
-if [[ -z "$PYFILE" ]]; then
-  echo "ERROR: Set PYFILE=path/to/your_entry_script.py when calling sbatch." >&2
-  exit 2
-fi
 
 # Ensure output directory exists per-node
 mkdir -p "$OUTDIR"
 
 # ---------- Environment ----------
 module purge
-module load python/3.10 || true 
+module load python/3.12 || true 
 
 VENV_DIR="$OUTDIR/venv"
 python -m venv "$VENV_DIR"
@@ -57,14 +52,14 @@ export NUMEXPR_NUM_THREADS=1
 export MPLBACKEND=Agg  # no GUI
 
 # Slurm gives you this many logical CPUs; pass it to --jobs
-JOBS=${SLURM_CPUS_PER_TASK:-8}
+JOBS=$SLURM_CPUS_PER_TASK
 
 # Convert SEEDS string into array for nice expansion below
 read -r -a SEED_ARR <<< "$SEEDS_ENV"
 
 # ---------- Run ----------
 set -x
-srun python -u "$PYFILE" \
+srun python -u "single_reservoir_baseline.py" \
   --ga \
   --jobs "$JOBS" \
   --pop "$POP" \
