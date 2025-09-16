@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=ga_cpu
 #SBATCH --account=sy-grp  
-#SBATCH --partition=share             # CPU partition; change to a CPU partition you can use
+#SBATCH --partition=eecs             # CPU partition; change to a CPU partition you can use
 #SBATCH --time=4:00:00               # walltime HH:MM:SS
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48            # use all these threads inside the GA via --jobs
+#SBATCH --cpus-per-task=40            # use all these threads inside the GA via --jobs
 #SBATCH --mem=24G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
