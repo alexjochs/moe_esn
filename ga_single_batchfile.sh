@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ga_cpu
-#SBATCH --account=sy-grp  
+#SBATCH --account=eecs  
 #SBATCH --partition=eecs             # CPU partition; change to a CPU partition you can use
 #SBATCH --time=4:00:00               # walltime HH:MM:SS
 #SBATCH --nodes=1
