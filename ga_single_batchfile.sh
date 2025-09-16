@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=ga_cpu
 #SBATCH --account=eecs  
-#SBATCH --partition=eecs             # CPU partition; change to a CPU partition you can use
-#SBATCH --time=4:00:00               # walltime HH:MM:SS
+#SBATCH --partition=share           # high core-count partition for worker fan-out
+#SBATCH --time=4:00:00              # walltime HH:MM:SS
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=40            # use all these threads inside the GA via --jobs
-#SBATCH --mem=24G
+#SBATCH --cpus-per-task=2           # head node just orchestrates Dask
+#SBATCH --mem=8G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #SBATCH --mail-type=ALL
@@ -25,7 +25,8 @@ mkdir -p "$OUTDIR"
 
 # ---------- Environment ----------
 module purge
-module load python/3.12 || true 
+module load python/3.12 || true
+module load slurm || module load slurm/slurm || true
 
 VENV_DIR="$PWD/venv"
 python -m venv "$VENV_DIR"
@@ -42,8 +43,14 @@ export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export MPLBACKEND=Agg  # no GUI
 
-# Slurm gives you this many logical CPUs; pass it to --jobs
-JOBS=$SLURM_CPUS_PER_TASK
+DASK_JOBS=${DASK_JOBS:-40}
+DASK_WORKER_CORES=${DASK_WORKER_CORES:-10}
+DASK_WORKER_MEM=${DASK_WORKER_MEM:-16GB}
+DASK_WORKER_WALLTIME=${DASK_WORKER_WALLTIME:-01:00:00}
+DASK_PARTITION=${DASK_PARTITION:-share}
+DASK_ACCOUNT=${DASK_ACCOUNT:-eecs}
+DASK_TIMEOUT=${DASK_TIMEOUT:-600}
+DASK_PROCESSES_PER_WORKER=${DASK_PROCESSES_PER_WORKER:-1}
 
 # Convert SEEDS string into array for nice expansion below
 read -r -a SEED_ARR <<< "$SEEDS_ENV"
@@ -52,7 +59,15 @@ read -r -a SEED_ARR <<< "$SEEDS_ENV"
 set -x
 python -u "single_reservoir_baseline.py" \
   --ga \
-  --jobs "$JOBS" \
+  --dask \
+  --jobs "$DASK_JOBS" \
+  --dask-worker-cores "$DASK_WORKER_CORES" \
+  --dask-worker-mem "$DASK_WORKER_MEM" \
+  --dask-worker-walltime "$DASK_WORKER_WALLTIME" \
+  --dask-account "$DASK_ACCOUNT" \
+  --dask-partition "$DASK_PARTITION" \
+  --dask-processes-per-worker "$DASK_PROCESSES_PER_WORKER" \
+  --dask-timeout "$DASK_TIMEOUT" \
   --pop "$POP" \
   --gens "$GENS" \
   --seeds "${SEED_ARR[@]}" \

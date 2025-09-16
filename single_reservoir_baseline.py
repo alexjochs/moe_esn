@@ -8,6 +8,7 @@ Refactor: baseline logic moved into functions; added optional GA optimizer (`--g
 
 import numpy as np
 import os 
+import sys
 import matplotlib.pyplot as plt
 from numpy.linalg import eigvals
 from sklearn.linear_model import Ridge
@@ -361,6 +362,103 @@ def _eval_genome(genome, base_seed=42):
     return fitness, aux
 
 
+def _start_dask_cluster(args, outdir: Path):
+    """Spin up a Dask SLURMCluster for GA evaluation."""
+    try:
+        from dask_jobqueue import SLURMCluster
+        from dask.distributed import Client
+    except ImportError as exc:
+        raise RuntimeError(
+            "Dask GA mode requires dask[distributed] and dask-jobqueue; install them in the venv."
+        ) from exc
+
+    jobs = max(1, int(getattr(args, 'jobs', 1)))
+    queue = getattr(args, 'dask_partition', 'share')
+    account = getattr(args, 'dask_account', 'eecs')
+    worker_cores = max(1, int(getattr(args, 'dask_worker_cores', 10)))
+    worker_mem = getattr(args, 'dask_worker_mem', '16GB')
+    worker_walltime = getattr(args, 'dask_worker_walltime', '01:00:00')
+    processes = max(1, int(getattr(args, 'dask_processes_per_worker', 1)))
+    timeout = float(getattr(args, 'dask_timeout', 600))
+
+    log_dir = outdir / 'dask_logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    local_dir = Path(os.environ.get('TMPDIR', '/tmp'))
+
+    env_extra = [
+        'export OMP_NUM_THREADS=1',
+        'export OPENBLAS_NUM_THREADS=1',
+        'export MKL_NUM_THREADS=1',
+        'export VECLIB_MAXIMUM_THREADS=1',
+        'export NUMEXPR_NUM_THREADS=1',
+    ]
+
+    job_script_prologue = []
+    venv_path = os.environ.get('VIRTUAL_ENV')
+    if venv_path:
+        job_script_prologue.append(f"source {venv_path}/bin/activate")
+
+    print(
+        f"[Dask] Starting cluster: jobs={jobs} cores/job={worker_cores} mem/job={worker_mem} "
+        f"queue={queue} account={account}"
+    )
+
+    cluster = SLURMCluster(
+        queue=queue,
+        account=account,
+        processes=processes,
+        cores=worker_cores,
+        memory=worker_mem,
+        walltime=worker_walltime,
+        python=sys.executable,
+        local_directory=str(local_dir),
+        log_directory=str(log_dir),
+        job_script_prologue=job_script_prologue,
+        env_extra=env_extra,
+    )
+
+    try:
+        cluster.scale(jobs=jobs)
+        client = Client(cluster, timeout=timeout)
+        expected = jobs * processes
+        client.wait_for_workers(n_workers=expected, timeout=timeout)
+    except Exception:
+        cluster.close()
+        raise
+
+    info = client.scheduler_info()
+    address = info.get('address', 'unknown')
+    print(f"[Dask] Scheduler reachable at {address}; expected workers: {expected}")
+    return cluster, client
+
+
+def _dask_evaluate_population(client, population, seeds):
+    """Evaluate the GA population using an existing Dask client."""
+    if not population:
+        return []
+
+    futures = []
+    genome_indices: List[int] = []
+    for idx, g in enumerate(population):
+        for seed in seeds:
+            futures.append(client.submit(_eval_genome, g, base_seed=seed, pure=False))
+            genome_indices.append(idx)
+
+    results = client.gather(futures)
+
+    fitness_accum: List[List[float]] = [[] for _ in population]
+    for idx, (fit, _aux) in zip(genome_indices, results):
+        fitness_accum[idx].append(float(fit))
+
+    mean_fitness = []
+    for idx, vals in enumerate(fitness_accum):
+        if not vals:
+            mean_fitness.append(1e6)
+        else:
+            mean_fitness.append(float(np.mean(np.array(vals, dtype=float))))
+    return mean_fitness
+
+
 def run_ga(args):
     print("running GA")
     pop = int(getattr(args, 'pop', 20))
@@ -405,62 +503,76 @@ def run_ga(args):
     with open(log_path, 'w') as logf:
         logf.write('gen\tbest_fitness\n')
 
-    for gen in range(gens):
-        fitnesses = []
-        if jobs > 1:
-            # Parallel evaluation
-            with concurrent.futures.ProcessPoolExecutor(max_workers=min(jobs, num_workers)) as executor:
-                jobs_list = []
-                for g in population:
-                    jobs_list.append([executor.submit(_eval_genome, g, base_seed=s) for s in seeds])
-                for genome_jobs in jobs_list:
-                    fs = []
-                    for job in genome_jobs:
-                        f, _ = job.result()
-                        fs.append(f)
-                    fitnesses.append(float(np.mean(fs)))
-        else:
-            # Sequential evaluation
-            for g in population:
-                fs = []
-                for s in seeds:
-                    f, _ = _eval_genome(g, base_seed=s)
-                    fs.append(f)
-                fitnesses.append(float(np.mean(fs)))
+    dask_cluster = None
+    dask_client = None
+    try:
+        if getattr(args, 'dask', False):
+            dask_cluster, dask_client = _start_dask_cluster(args, outdir)
 
-        # track best
-        order = np.argsort(np.array(fitnesses))
-        best_idx = int(order[0])
-        best = (population[best_idx], float(fitnesses[best_idx]))
-        history.append(best[1])
+        for gen in range(gens):
+            if dask_client is not None:
+                fitnesses = _dask_evaluate_population(dask_client, population, seeds)
+            else:
+                fitnesses = []
+                if jobs > 1:
+                    # Parallel evaluation via local processes
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=min(jobs, num_workers)) as executor:
+                        jobs_list = []
+                        for g in population:
+                            jobs_list.append([executor.submit(_eval_genome, g, base_seed=s) for s in seeds])
+                        for genome_jobs in jobs_list:
+                            fs = []
+                            for job in genome_jobs:
+                                f, _ = job.result()
+                                fs.append(f)
+                            fitnesses.append(float(np.mean(fs)))
+                else:
+                    # Sequential evaluation
+                    for g in population:
+                        fs = []
+                        for s in seeds:
+                            f, _ = _eval_genome(g, base_seed=s)
+                            fs.append(f)
+                        fitnesses.append(float(np.mean(fs)))
 
-        # write per-gen summary
-        with open(log_path, 'a') as logf:
-            logf.write(f"{gen}\t{best[1]:.8f}\n")
-        # also dump current best genome each gen for resiliency
-        _write_json(outdir / 'best_genome.json', {'fitness': best[1], 'genome': _genome_to_dict(best[0])})
+            # track best
+            order = np.argsort(np.array(fitnesses))
+            best_idx = int(order[0])
+            best = (population[best_idx], float(fitnesses[best_idx]))
+            history.append(best[1])
 
-        print(f"gen {gen:03d} best_fitness {best[1]:.6f}")
+            # write per-gen summary
+            with open(log_path, 'a') as logf:
+                logf.write(f"{gen}\t{best[1]:.8f}\n")
+            # also dump current best genome each gen for resiliency
+            _write_json(outdir / 'best_genome.json', {'fitness': best[1], 'genome': _genome_to_dict(best[0])})
 
-        # selection: tournament size 3
-        def _tournament():
-            idxs = rng.choice(len(population), size=3, replace=False)
-            best_local = min(idxs, key=lambda i: fitnesses[i])
-            return population[best_local]
+            print(f"gen {gen:03d} best_fitness {best[1]:.6f}")
 
-        new_pop = []
-        # elitism: keep top 2
-        new_pop.append(population[int(order[0])])
-        if pop > 1:
-            new_pop.append(population[int(order[1])])
-        # fill rest
-        while len(new_pop) < pop:
-            a = _tournament()
-            b = _tournament()
-            child = _crossover(a, b, rng)
-            child = _mutate(child, rng)
-            new_pop.append(child)
-        population = new_pop
+            # selection: tournament size 3
+            def _tournament():
+                idxs = rng.choice(len(population), size=3, replace=False)
+                best_local = min(idxs, key=lambda i: fitnesses[i])
+                return population[best_local]
+
+            new_pop = []
+            # elitism: keep top 2
+            new_pop.append(population[int(order[0])])
+            if pop > 1:
+                new_pop.append(population[int(order[1])])
+            # fill rest
+            while len(new_pop) < pop:
+                a = _tournament()
+                b = _tournament()
+                child = _crossover(a, b, rng)
+                child = _mutate(child, rng)
+                new_pop.append(child)
+            population = new_pop
+    finally:
+        if dask_client is not None:
+            dask_client.close()
+        if dask_cluster is not None:
+            dask_cluster.close()
 
     # final report and saves
     g_best, f_best = best
@@ -580,6 +692,14 @@ if __name__ == "__main__":
     p.add_argument('--gens', type=int, default=2, help='GA number of generations')
     p.add_argument('--seeds', type=int, nargs='*', default=[42, 1337, 2025], help='list of seeds to average fitness over')
     p.add_argument('--no-plots', action='store_true', help='suppress matplotlib windows (useful on headless/HPC)')
+    p.add_argument('--dask', action='store_true', help='use Dask + Slurm for GA evaluation instead of local processes')
+    p.add_argument('--dask-worker-cores', type=int, default=10, help='CPU cores per Dask worker job (<=10 to satisfy policy)')
+    p.add_argument('--dask-worker-mem', type=str, default='16GB', help='Memory per Dask worker job (e.g., 16GB)')
+    p.add_argument('--dask-worker-walltime', type=str, default='01:00:00', help='Walltime per Dask worker job (HH:MM:SS)')
+    p.add_argument('--dask-account', type=str, default='eecs', help='Slurm account for Dask worker jobs')
+    p.add_argument('--dask-partition', type=str, default='share', help='Slurm partition for Dask worker jobs')
+    p.add_argument('--dask-processes-per-worker', type=int, default=1, help='Dask processes per worker job (default 1)')
+    p.add_argument('--dask-timeout', type=float, default=600.0, help='Seconds to wait for Dask workers to start')
     args = p.parse_args()
 
     # If no display or user requests no plots, use non-interactive backend to avoid crashes on HPC
