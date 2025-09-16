@@ -50,7 +50,7 @@ read -r -a SEED_ARR <<< "$SEEDS_ENV"
 
 # ---------- Run ----------
 set -x
-srun python -u "single_reservoir_baseline.py" \
+python -u "single_reservoir_baseline.py" \
   --ga \
   --jobs "$JOBS" \
   --pop "$POP" \
