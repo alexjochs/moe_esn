@@ -11,14 +11,7 @@
 #SBATCH --error=%x-%j.err
 #SBATCH --mail-type=ALL
 
-# --------------------------
-# Usage notes (edit these):
-#   1) Set PYFILE to your entrypoint script (the one with argparse in __main__).
-#   2) Replace <YOUR_PI_ACCOUNT> above with your Slurm account for the research group.
-#   3) Optionally adjust partition, time, cpus, and mem based on sinfo and availability.
-#   4) Submit with:  sbatch ga_single_batchfile.sh PYFILE=path/to/your_script.py TAG=myrun POP=50 GENS=20
-# --------------------------
-
+set -euo pipefail
 # -------- Parameters via environment or defaults --------
 OUTDIR=${OUTDIR:-$PWD/runs}
 TAG=${TAG:-ga-$(date +%Y%m%d-%H%M%S)}
@@ -34,7 +27,7 @@ mkdir -p "$OUTDIR"
 module purge
 module load python/3.12 || true 
 
-VENV_DIR="$OUTDIR/venv"
+VENV_DIR="$PWD/venv"
 python -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
