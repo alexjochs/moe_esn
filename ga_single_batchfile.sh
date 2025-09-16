@@ -46,14 +46,22 @@ export MPLBACKEND=Agg  # no GUI
 DASK_JOBS=${DASK_JOBS:-40}
 DASK_WORKER_CORES=${DASK_WORKER_CORES:-10}
 DASK_WORKER_MEM=${DASK_WORKER_MEM:-16GB}
-DASK_WORKER_WALLTIME=${DASK_WORKER_WALLTIME:-01:00:00}
-DASK_PARTITION=${DASK_PARTITION:-share}
+DASK_WORKER_WALLTIME=${DASK_WORKER_WALLTIME:-04:00:00}
+DASK_PARTITION=${DASK_PARTITION:-preempt}
 DASK_ACCOUNT=${DASK_ACCOUNT:-eecs}
 DASK_TIMEOUT=${DASK_TIMEOUT:-600}
 DASK_PROCESSES_PER_WORKER=${DASK_PROCESSES_PER_WORKER:-1}
+DASK_CHUNK_SIZE=${DASK_CHUNK_SIZE:-10}
+DASK_PREEMPT_REQUEUE=${DASK_PREEMPT_REQUEUE:-1}
 
 # Convert SEEDS string into array for nice expansion below
 read -r -a SEED_ARR <<< "$SEEDS_ENV"
+
+# Optional flag assembly
+GA_EXTRA_FLAGS=()
+if [[ "$DASK_PREEMPT_REQUEUE" == "1" ]]; then
+  GA_EXTRA_FLAGS+=("--dask-preempt-requeue")
+fi
 
 # ---------- Run ----------
 set -x
@@ -68,6 +76,8 @@ python -u "single_reservoir_baseline.py" \
   --dask-partition "$DASK_PARTITION" \
   --dask-processes-per-worker "$DASK_PROCESSES_PER_WORKER" \
   --dask-timeout "$DASK_TIMEOUT" \
+  --dask-chunk-size "$DASK_CHUNK_SIZE" \
+  "${GA_EXTRA_FLAGS[@]}" \
   --pop "$POP" \
   --gens "$GENS" \
   --seeds "${SEED_ARR[@]}" \

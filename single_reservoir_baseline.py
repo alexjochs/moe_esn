@@ -362,6 +362,15 @@ def _eval_genome(genome, base_seed=42):
     return fitness, aux
 
 
+def _eval_genome_multi_seed(genome, seeds):
+    """Evaluate one genome across multiple seeds and return its mean fitness."""
+    fs = []
+    for seed in seeds:
+        f, _aux = _eval_genome(genome, base_seed=seed)
+        fs.append(float(f))
+    return float(np.mean(np.array(fs, dtype=float)))
+
+
 def _start_dask_cluster(args, outdir: Path):
     """Spin up a Dask SLURMCluster for GA evaluation."""
     try:
@@ -378,6 +387,7 @@ def _start_dask_cluster(args, outdir: Path):
     worker_cores = max(1, int(getattr(args, 'dask_worker_cores', 10)))
     worker_mem = getattr(args, 'dask_worker_mem', '16GB')
     worker_walltime = getattr(args, 'dask_worker_walltime', '01:00:00')
+    preempt_requeue = bool(getattr(args, 'dask_preempt_requeue', False))
     processes = max(1, int(getattr(args, 'dask_processes_per_worker', 1)))
     timeout = float(getattr(args, 'dask_timeout', 600))
 
@@ -403,6 +413,10 @@ def _start_dask_cluster(args, outdir: Path):
         f"queue={queue} account={account}"
     )
 
+    job_extra = []
+    if preempt_requeue:
+        job_extra.append('--requeue')
+
     cluster = SLURMCluster(
         queue=queue,
         account=account,
@@ -415,10 +429,12 @@ def _start_dask_cluster(args, outdir: Path):
         log_directory=str(log_dir),
         job_script_prologue=job_script_prologue,
         env_extra=env_extra,
+        job_extra=job_extra,
     )
 
+    desired_jobs = jobs
     try:
-        cluster.scale(jobs=jobs)
+        cluster.scale(jobs=desired_jobs)
         client = Client(cluster, timeout=timeout)
         expected = jobs * processes
         client.wait_for_workers(n_workers=expected, timeout=timeout)
@@ -429,33 +445,53 @@ def _start_dask_cluster(args, outdir: Path):
     info = client.scheduler_info()
     address = info.get('address', 'unknown')
     print(f"[Dask] Scheduler reachable at {address}; expected workers: {expected}")
-    return cluster, client
+    return cluster, client, expected, desired_jobs
 
 
-def _dask_evaluate_population(client, population, seeds):
-    """Evaluate the GA population using an existing Dask client."""
+def _evaluate_chunk(genomes, seeds, worker_cores):
+    """Batch-evaluate a slice of genomes with a local process pool."""
+    if not genomes:
+        return []
+
+    max_workers = max(1, min(worker_cores, len(genomes)))
+    results = [1e6] * len(genomes)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {
+            pool.submit(_eval_genome_multi_seed, genome, seeds): idx
+            for idx, genome in enumerate(genomes)
+        }
+        for fut, idx in future_map.items():
+            results[idx] = float(fut.result())
+    return results
+
+
+def _dask_evaluate_population(client, population, seeds, chunk_size, worker_cores):
+    """Evaluate genomes in chunks so each worker fully uses its allocated cores."""
     if not population:
         return []
 
+    chunk_size = max(1, int(chunk_size))
     futures = []
-    genome_indices: List[int] = []
-    for idx, g in enumerate(population):
-        for seed in seeds:
-            futures.append(client.submit(_eval_genome, g, base_seed=seed, pure=False))
-            genome_indices.append(idx)
+    slices: List[Tuple[int, int]] = []
+    for start in range(0, len(population), chunk_size):
+        end = min(start + chunk_size, len(population))
+        chunk = population[start:end]
+        fut = client.submit(
+            _evaluate_chunk,
+            chunk,
+            seeds,
+            worker_cores,
+            pure=False,
+        )
+        futures.append(fut)
+        slices.append((start, end))
 
-    results = client.gather(futures)
-
-    fitness_accum: List[List[float]] = [[] for _ in population]
-    for idx, (fit, _aux) in zip(genome_indices, results):
-        fitness_accum[idx].append(float(fit))
-
-    mean_fitness = []
-    for idx, vals in enumerate(fitness_accum):
-        if not vals:
-            mean_fitness.append(1e6)
-        else:
-            mean_fitness.append(float(np.mean(np.array(vals, dtype=float))))
+    gathered = client.gather(futures)
+    mean_fitness = [1e6] * len(population)
+    for (start, end), chunk_vals in zip(slices, gathered):
+        if len(chunk_vals) != (end - start):
+            raise RuntimeError("Unexpected chunk result length from Dask worker")
+        mean_fitness[start:end] = [float(v) for v in chunk_vals]
     return mean_fitness
 
 
@@ -505,13 +541,37 @@ def run_ga(args):
 
     dask_cluster = None
     dask_client = None
+    expected_workers = None
+    desired_jobs = None
     try:
         if getattr(args, 'dask', False):
-            dask_cluster, dask_client = _start_dask_cluster(args, outdir)
+            dask_cluster, dask_client, expected_workers, desired_jobs = _start_dask_cluster(args, outdir)
 
         for gen in range(gens):
             if dask_client is not None:
-                fitnesses = _dask_evaluate_population(dask_client, population, seeds)
+                try:
+                    info = dask_client.scheduler_info()
+                    n_workers = len(info.get('workers', {}))
+                    if expected_workers is not None and n_workers < expected_workers:
+                        missing = expected_workers - n_workers
+                        print(
+                            f"[Dask] Detected {missing} missing workers (have {n_workers}/{expected_workers}); rescaling"
+                        )
+                        if desired_jobs is not None:
+                            dask_cluster.scale(jobs=desired_jobs)
+                        dask_client.wait_for_workers(
+                            n_workers=expected_workers,
+                            timeout=float(getattr(args, 'dask_timeout', 600)),
+                        )
+                except Exception as exc:
+                    print(f"[Dask] Warning: could not refresh worker pool: {exc}")
+                fitnesses = _dask_evaluate_population(
+                    dask_client,
+                    population,
+                    seeds,
+                    getattr(args, 'dask_chunk_size', 10),
+                    max(1, int(getattr(args, 'dask_worker_cores', 10))),
+                )
             else:
                 fitnesses = []
                 if jobs > 1:
@@ -700,6 +760,8 @@ if __name__ == "__main__":
     p.add_argument('--dask-partition', type=str, default='share', help='Slurm partition for Dask worker jobs')
     p.add_argument('--dask-processes-per-worker', type=int, default=1, help='Dask processes per worker job (default 1)')
     p.add_argument('--dask-timeout', type=float, default=600.0, help='Seconds to wait for Dask workers to start')
+    p.add_argument('--dask-chunk-size', type=int, default=10, help='How many genomes each Dask worker evaluates per task')
+    p.add_argument('--dask-preempt-requeue', action='store_true', help='Request --requeue for worker jobs on preemptible partitions')
     args = p.parse_args()
 
     # If no display or user requests no plots, use non-interactive backend to avoid crashes on HPC
