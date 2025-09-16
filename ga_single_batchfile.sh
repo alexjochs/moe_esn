@@ -1,5 +1,3 @@
-
-
 #!/bin/bash
 #SBATCH --job-name=ga_cpu
 #SBATCH --account=sy-grp  
