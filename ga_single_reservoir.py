@@ -1,6 +1,6 @@
+import argparse
 import concurrent.futures
 import json
-import math
 import os
 import sys
 from datetime import datetime
@@ -16,7 +16,16 @@ from single_reservoir_core import build_reservoir, evaluate, teacher_forced_stat
 
 
 DEFAULT_HORIZONS = (5, 10, 50)
-DEFAULT_OFFSETS = (0, 5, 10, 20, 30, 40, 50, 75, 100, 150, 200, 300, 400)
+DEFAULT_OFFSETS = (0, 50, 100, 300,)
+
+GA_CONFIG = _NS(
+    N=1500,
+    L=1,
+    H=15_000,
+    N_DISCARD=100,
+    C=0.05,
+    DECAY_RATE=1.0,
+)
 
 
 def genome_to_dict(g: _NS) -> Dict[str, float]:
@@ -38,17 +47,17 @@ def timestamp() -> str:
     return datetime.now().strftime('%Y%m%d-%H%M%S')
 
 
-def resolve_outdir(base: str | None, tag: str | None) -> Path:
-    base_dir = Path(base) if base else Path('runs')
+def resolve_outdir(base: str, tag: str) -> Path:
+    base_dir = Path(base)
     slurm_id = os.environ.get('SLURM_JOB_ID')
     slurm_array_id = os.environ.get('SLURM_ARRAY_TASK_ID')
-    parts: List[str] = [tag] if tag else []
+    parts: List[str] = [tag]
     if slurm_id:
         parts.append(f"slurm{slurm_id}")
     if slurm_array_id:
         parts.append(f"arr{slurm_array_id}")
     parts.append(timestamp())
-    outdir = base_dir.joinpath(*[p for p in parts if p])
+    outdir = base_dir.joinpath(*parts)
     outdir.mkdir(parents=True, exist_ok=True)
     return outdir
 
@@ -71,14 +80,14 @@ def default_genome(C: float, decay_rate: float) -> _NS:
     return _NS(
         C=C,
         DECAY_RATE=decay_rate,
-        target_rho=0.9,
-        p_nonzero=0.0125,
-        w_scale=0.4,
-        p_in=0.5,
-        w_in_scale=0.14,
-        wback_scale=0.56,
+        target_rho=0.6072229533959054,
+        p_nonzero=0.0002780440231267247,
+        w_scale=0.08948540567520748,
+        p_in=0.43097525871856673,
+        w_in_scale=0.15284045686064893,
+        wback_scale=1.2666342453436854,
         bias_value=0.0,
-        log10_alpha=math.log10(1e-6),
+        log10_alpha=-6.014296756825457,
     )
 
 
@@ -170,36 +179,18 @@ def eval_genome_multi_seed(genome: _NS, seeds: Sequence[int], config: _NS) -> fl
 
 
 def start_dask_cluster(args, outdir: Path):
-    try:
-        from dask_jobqueue import SLURMCluster
-        from dask.distributed import Client
-    except ImportError as exc:
-        raise RuntimeError(
-            "Dask GA mode requires dask[distributed] and dask-jobqueue; install them in the venv."
-        ) from exc
+    from dask_jobqueue import SLURMCluster
+    from dask.distributed import Client
 
-    jobs = max(1, int(getattr(args, 'jobs', 1)))
-    queue = getattr(args, 'dask_partition', 'share')
-    account = getattr(args, 'dask_account', 'eecs')
-    worker_cores = max(1, int(getattr(args, 'dask_worker_cores', 10)))
-    worker_mem = getattr(args, 'dask_worker_mem', '16GB')
-    worker_walltime = getattr(args, 'dask_worker_walltime', '01:00:00')
-    preempt_requeue = bool(getattr(args, 'dask_preempt_requeue', False))
-    processes_arg = getattr(args, 'dask_processes_per_worker', None)
-    pop_size = max(1, int(getattr(args, 'pop', 20)))
-    if processes_arg is None:
-        per_job_target = math.ceil(pop_size / jobs) if jobs else pop_size
-        processes = max(1, min(worker_cores, per_job_target))
-    else:
-        processes = max(1, int(processes_arg))
-
-    if processes > worker_cores:
-        print(
-            f"[Dask] Requested processes/job ({processes}) exceeds cores/job ({worker_cores}); clamping to cores."
-        )
-        processes = worker_cores
-
-    timeout = float(getattr(args, 'dask_timeout', 600))
+    jobs = int(args.jobs)
+    queue = args.dask_partition
+    account = args.dask_account
+    worker_cores = int(args.dask_worker_cores)
+    worker_mem = args.dask_worker_mem
+    worker_walltime = args.dask_worker_walltime
+    preempt_requeue = args.dask_preempt_requeue
+    processes = int(args.dask_processes_per_worker)
+    timeout = float(args.dask_timeout)
 
     log_dir = outdir / 'dask_logs'
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -289,12 +280,12 @@ def dask_evaluate_population(client,
 
 def run_ga(args, config: _NS) -> Tuple[_NS, float, List[float]]:
     print("running GA")
-    pop = int(getattr(args, 'pop', 20))
-    gens = int(getattr(args, 'gens', 2))
-    jobs = int(getattr(args, 'jobs', 1))
-    seeds = [int(s) for s in getattr(args, 'seeds', [42, 1337, 2025])]
+    pop = int(args.pop)
+    gens = int(args.gens)
+    jobs = int(args.jobs)
+    seeds = [int(s) for s in args.seeds]
 
-    outdir = resolve_outdir(getattr(args, 'outdir', None), getattr(args, 'tag', None))
+    outdir = resolve_outdir(args.outdir, args.tag)
     (outdir / 'artifacts').mkdir(exist_ok=True)
 
     cfg_snapshot = {
@@ -310,7 +301,6 @@ def run_ga(args, config: _NS) -> Tuple[_NS, float, List[float]]:
     }
     write_json(outdir / 'config.json', cfg_snapshot)
 
-    num_workers = os.cpu_count() if jobs > 1 else 1
     rng = np.random.default_rng(42)
 
     population = []
@@ -331,51 +321,29 @@ def run_ga(args, config: _NS) -> Tuple[_NS, float, List[float]]:
     expected_workers = None
     desired_jobs = None
     try:
-        if getattr(args, 'dask', False):
-            dask_cluster, dask_client, expected_workers, desired_jobs = start_dask_cluster(args, outdir)
-
+        dask_cluster, dask_client, expected_workers, desired_jobs = start_dask_cluster(args, outdir)
         for gen in range(gens):
-            if dask_client is not None:
-                try:
-                    info = dask_client.scheduler_info()
-                    n_workers = len(info.get('workers', {}))
-                    if expected_workers is not None and n_workers < expected_workers:
-                        missing = expected_workers - n_workers
-                        print(
-                            f"[Dask] Detected {missing} missing workers (have {n_workers}/{expected_workers}); rescaling"
-                        )
-                        if desired_jobs is not None:
-                            dask_cluster.scale(jobs=desired_jobs)
-                        dask_client.wait_for_workers(
-                            n_workers=expected_workers,
-                            timeout=float(getattr(args, 'dask_timeout', 600)),
-                        )
-                except Exception as exc:
-                    print(f"[Dask] Warning: could not refresh worker pool: {exc}")
+            try:
+                info = dask_client.scheduler_info()
+                n_workers = len(info.get('workers', {}))
+                if expected_workers is not None and n_workers < expected_workers:
+                    missing = expected_workers - n_workers
+                    print(
+                        f"[Dask] Detected {missing} missing workers (have {n_workers}/{expected_workers}); rescaling"
+                    )
+                    dask_cluster.scale(jobs=desired_jobs)
+                    dask_client.wait_for_workers(
+                        n_workers=expected_workers,
+                        timeout=float(args.dask_timeout),
+                    )
+            except Exception as exc:
+                print(f"[Dask] Warning: could not refresh worker pool: {exc}")
 
-                chunk_cfg = getattr(args, 'dask_chunk_size', None)
-                if chunk_cfg is None:
-                    total_procs = expected_workers if expected_workers else 1
-                    denom = max(1, 2 * total_procs)
-                    chunk_size = max(1, len(population) // denom)
-                else:
-                    chunk_size = max(1, int(chunk_cfg))
+            total_procs = expected_workers if expected_workers else 1
+            denom = max(1, 2 * total_procs)
+            chunk_size = max(1, len(population) // denom)
 
-                fitnesses = dask_evaluate_population(dask_client, population, seeds, chunk_size, config)
-            else:
-                fitnesses: List[float] = []
-                if jobs > 1:
-                    with concurrent.futures.ProcessPoolExecutor(max_workers=min(jobs, num_workers)) as executor:
-                        jobs_list = []
-                        for genome in population:
-                            jobs_list.append([executor.submit(eval_genome, genome, config, base_seed=s) for s in seeds])
-                        for genome_jobs in jobs_list:
-                            fs = [job.result()[0] for job in genome_jobs]
-                            fitnesses.append(float(np.mean(fs)))
-                else:
-                    for genome in population:
-                        fs = [eval_genome(genome, config, base_seed=s)[0] for s in seeds]
-                        fitnesses.append(float(np.mean(fs)))
+            fitnesses = dask_evaluate_population(dask_client, population, seeds, chunk_size, config)
 
             order = np.argsort(np.array(fitnesses))
             best_idx = int(order[0])
@@ -422,3 +390,39 @@ def run_ga(args, config: _NS) -> Tuple[_NS, float, List[float]]:
 
     return best_genome, best_fitness, history
 
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Genetic algorithm tuner for single ESN reservoir")
+    parser.add_argument('--outdir', type=str, required=True,
+                        help='base output directory for artifacts')
+    parser.add_argument('--tag', type=str, required=True,
+                        help='run tag prefix for output directory naming')
+    parser.add_argument('--jobs', type=int, required=True,
+                        help='maximum worker processes for GA evaluation')
+    parser.add_argument('--pop', type=int, required=True, help='GA population size')
+    parser.add_argument('--gens', type=int, required=True, help='GA generations to run')
+    parser.add_argument('--seeds', type=int, nargs='+', required=True,
+                        help='list of seeds used for averaging fitness')
+    parser.add_argument('--dask-worker-cores', type=int, required=True,
+                        help='CPU cores per Dask worker job')
+    parser.add_argument('--dask-worker-mem', type=str, required=True,
+                        help='memory per Dask worker job (e.g., 16GB)')
+    parser.add_argument('--dask-worker-walltime', type=str, required=True,
+                        help='walltime per Dask worker job')
+    parser.add_argument('--dask-account', type=str, required=True,
+                        help='Slurm account for Dask worker jobs')
+    parser.add_argument('--dask-partition', type=str, required=True,
+                        help='Slurm partition for Dask worker jobs')
+    parser.add_argument('--dask-processes-per-worker', type=int, required=True,
+                        help='Dask processes per worker job')
+    parser.add_argument('--dask-timeout', type=float, required=True,
+                        help='seconds to wait for Dask workers to start')
+    parser.add_argument('--dask-preempt-requeue', action='store_true',
+                        help='request --requeue for worker jobs on preemptible partitions')
+    return parser
+
+
+if __name__ == '__main__':
+    parser = build_arg_parser()
+    cli_args = parser.parse_args()
+    run_ga(cli_args, GA_CONFIG)

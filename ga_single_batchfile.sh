@@ -51,7 +51,6 @@ DASK_PARTITION=${DASK_PARTITION:-preempt}
 DASK_ACCOUNT=${DASK_ACCOUNT:-eecs}
 DASK_TIMEOUT=${DASK_TIMEOUT:-600}
 DASK_PROCESSES_PER_WORKER=${DASK_PROCESSES_PER_WORKER:-$DASK_WORKER_CORES}
-DASK_CHUNK_SIZE=${DASK_CHUNK_SIZE:-}
 DASK_PREEMPT_REQUEUE=${DASK_PREEMPT_REQUEUE:-1}
 
 # Convert SEEDS string into array for nice expansion below
@@ -62,18 +61,13 @@ GA_EXTRA_FLAGS=()
 if [[ "$DASK_PREEMPT_REQUEUE" == "1" ]]; then
   GA_EXTRA_FLAGS+=("--dask-preempt-requeue")
 fi
-if [[ -n "$DASK_CHUNK_SIZE" ]]; then
-  GA_EXTRA_FLAGS+=("--dask-chunk-size" "$DASK_CHUNK_SIZE")
-fi
 if [[ -n "$DASK_PROCESSES_PER_WORKER" ]]; then
   GA_EXTRA_FLAGS+=("--dask-processes-per-worker" "$DASK_PROCESSES_PER_WORKER")
 fi
 
 # ---------- Run ----------
 set -x
-python -u "single_reservoir_baseline.py" \
-  --ga \
-  --dask \
+python -u "ga_single_reservoir.py" \
   --jobs "$DASK_JOBS" \
   --dask-worker-cores "$DASK_WORKER_CORES" \
   --dask-worker-mem "$DASK_WORKER_MEM" \
@@ -85,7 +79,6 @@ python -u "single_reservoir_baseline.py" \
   --pop "$POP" \
   --gens "$GENS" \
   --seeds "${SEED_ARR[@]}" \
-  --no-plots \
   --outdir "$OUTDIR" \
   --tag "$TAG"
 set +x

@@ -166,11 +166,14 @@ def evaluate(reservoir: Reservoir,
     if targets.ndim == 1:
         targets = targets.reshape(1, -1)
     total_steps = targets.shape[1]
+    target_series = targets[0]
 
     regime_std: Dict[int, float] = {}
+    indices = np.arange(total_steps)
+    train_region = indices < train_end
     for regime in (Regime.MACKEY_GLASS, Regime.LORENZ, Regime.ROSSLER):
-        mask = (np.arange(total_steps) < train_end) & (labels == regime)
-        vals = targets[0, mask]
+        mask = train_region & (labels == regime)
+        vals = target_series[mask]
         regime_std[int(regime)] = float(np.std(vals)) if np.any(mask) else 1.0
 
     evaluation_records: List[Dict] = []
@@ -187,9 +190,9 @@ def evaluate(reservoir: Reservoir,
             for horizon in horizons:
                 if probe_index + horizon >= segment_stop:
                     continue
-                state_at_probe = states[:, probe_index].copy()
+                state_at_probe = states[:, probe_index]
                 y_pred, _ = free_run_from_state(reservoir, state_at_probe, W_out, horizon)
-                y_true = targets[0, probe_index + 1:probe_index + 1 + horizon]
+                y_true = target_series[probe_index + 1:probe_index + 1 + horizon]
                 normalization = regime_std[regime_id]
                 error_value = nrmse(y_pred, y_true, normalization)
                 if not np.isfinite(error_value):
