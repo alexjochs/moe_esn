@@ -259,33 +259,37 @@ W_IN_SPARSITY_2 = 0.40
 W_SPARSITY_2 = 0.985
 
 # Instantiate three frozen reservoirs
+# TODO(alexochs): migrate mixture_of_reservoirs to the simplified helpers in single_reservoir_core.
 reservoirs = [
     Reservoir(N, K, L, ReservoirParams(
         spectral_radius=SPECTRAL_RADIUS_0,
-        leak=DECAY_RATE_0,
-        w_in_scale=W_IN_SCALE_0,
+        C=C_0,
+        decay_rate=DECAY_RATE_0,
         w_scale=W_SCALE_0,
-        w_back_scale=W_BACK_SCALE_0,
-        w_in_sparsity=W_IN_SPARSITY_0,
         w_sparsity=W_SPARSITY_0,
+        w_back_scale=W_BACK_SCALE_0,
+        w_in_scale=W_IN_SCALE_0,
+        w_in_sparsity=W_IN_SPARSITY_0,
     ), rng),
     Reservoir(N, K, L, ReservoirParams(
         spectral_radius=SPECTRAL_RADIUS_1,
-        leak=DECAY_RATE_1,
-        w_in_scale=W_IN_SCALE_1,
+        C=C_1,
+        decay_rate=DECAY_RATE_1,
         w_scale=W_SCALE_1,
-        w_back_scale=W_BACK_SCALE_1,
-        w_in_sparsity=W_IN_SPARSITY_1,
         w_sparsity=W_SPARSITY_1,
+        w_back_scale=W_BACK_SCALE_1,
+        w_in_scale=W_IN_SCALE_1,
+        w_in_sparsity=W_IN_SPARSITY_1,
     ), rng),
     Reservoir(N, K, L, ReservoirParams(
         spectral_radius=SPECTRAL_RADIUS_2,
-        leak=DECAY_RATE_2,
-        w_in_scale=W_IN_SCALE_2,
+        C=C_2,
+        decay_rate=DECAY_RATE_2,
         w_scale=W_SCALE_2,
-        w_back_scale=W_BACK_SCALE_2,
-        w_in_sparsity=W_IN_SPARSITY_2,
         w_sparsity=W_SPARSITY_2,
+        w_back_scale=W_BACK_SCALE_2,
+        w_in_scale=W_IN_SCALE_2,
+        w_in_sparsity=W_IN_SPARSITY_2,
     ), rng),
 ]
 
