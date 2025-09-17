@@ -440,7 +440,6 @@ def _start_dask_cluster(args, outdir: Path):
         log_directory=str(log_dir),
         job_script_prologue=job_script_prologue,
         job_extra_directives=job_extra_directives,
-        threads_per_worker=1,
     )
 
     desired_jobs = jobs
