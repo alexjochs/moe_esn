@@ -388,7 +388,20 @@ def _start_dask_cluster(args, outdir: Path):
     worker_mem = getattr(args, 'dask_worker_mem', '16GB')
     worker_walltime = getattr(args, 'dask_worker_walltime', '01:00:00')
     preempt_requeue = bool(getattr(args, 'dask_preempt_requeue', False))
-    processes = max(1, int(getattr(args, 'dask_processes_per_worker', 1)))
+    processes_arg = getattr(args, 'dask_processes_per_worker', None)
+    pop_size = max(1, int(getattr(args, 'pop', 20)))
+    if processes_arg is None:
+        per_job_target = math.ceil(pop_size / jobs) if jobs else pop_size
+        processes = max(1, min(worker_cores, per_job_target))
+    else:
+        processes = max(1, int(processes_arg))
+
+    if processes > worker_cores:
+        print(
+            f"[Dask] Requested processes/job ({processes}) exceeds cores/job ({worker_cores}); clamping to cores."
+        )
+        processes = worker_cores
+
     timeout = float(getattr(args, 'dask_timeout', 600))
 
     log_dir = outdir / 'dask_logs'
@@ -407,7 +420,7 @@ def _start_dask_cluster(args, outdir: Path):
         job_script_prologue.insert(0, f"source {venv_path}/bin/activate")
 
     print(
-        f"[Dask] Starting cluster: jobs={jobs} cores/job={worker_cores} mem/job={worker_mem} "
+        f"[Dask] Starting cluster: jobs={jobs} cores/job={worker_cores} processes/job={processes} mem/job={worker_mem} "
         f"queue={queue} account={account}"
     )
 
@@ -427,6 +440,7 @@ def _start_dask_cluster(args, outdir: Path):
         log_directory=str(log_dir),
         job_script_prologue=job_script_prologue,
         job_extra_directives=job_extra_directives,
+        threads_per_worker=1,
     )
 
     desired_jobs = jobs
@@ -446,24 +460,15 @@ def _start_dask_cluster(args, outdir: Path):
 
 
 def _evaluate_chunk(genomes, seeds, worker_cores):
-    """Batch-evaluate a slice of genomes with a local process pool."""
+    """Sequentially evaluate a slice of genomes within a single Dask worker."""
     if not genomes:
         return []
 
-    max_workers = max(1, min(worker_cores, len(genomes)))
-    results = [1e6] * len(genomes)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map = {
-            pool.submit(_eval_genome_multi_seed, genome, seeds): idx
-            for idx, genome in enumerate(genomes)
-        }
-        for fut, idx in future_map.items():
-            results[idx] = float(fut.result())
-    return results
+    return [_eval_genome_multi_seed(genome, seeds) for genome in genomes]
 
 
 def _dask_evaluate_population(client, population, seeds, chunk_size, worker_cores):
-    """Evaluate genomes in chunks so each worker fully uses its allocated cores."""
+    """Evaluate genomes in Dask-managed chunks; each worker runs tasks sequentially."""
     if not population:
         return []
 
@@ -546,6 +551,7 @@ def run_ga(args):
 
         for gen in range(gens):
             if dask_client is not None:
+                n_workers = None
                 try:
                     info = dask_client.scheduler_info()
                     n_workers = len(info.get('workers', {}))
@@ -562,11 +568,22 @@ def run_ga(args):
                         )
                 except Exception as exc:
                     print(f"[Dask] Warning: could not refresh worker pool: {exc}")
+                chunk_cfg = getattr(args, 'dask_chunk_size', None)
+                if chunk_cfg is None:
+                    total_procs = n_workers if (n_workers and n_workers > 0) else expected_workers
+                    if not total_procs:
+                        total_procs = 1
+                    # Aim for ~2× more chunks than worker processes to keep scheduler fed.
+                    denom = max(1, 2 * total_procs)
+                    chunk_size = max(1, len(population) // denom)
+                else:
+                    chunk_size = max(1, int(chunk_cfg))
+
                 fitnesses = _dask_evaluate_population(
                     dask_client,
                     population,
                     seeds,
-                    getattr(args, 'dask_chunk_size', 10),
+                    chunk_size,
                     max(1, int(getattr(args, 'dask_worker_cores', 10))),
                 )
             else:
@@ -755,9 +772,11 @@ if __name__ == "__main__":
     p.add_argument('--dask-worker-walltime', type=str, default='01:00:00', help='Walltime per Dask worker job (HH:MM:SS)')
     p.add_argument('--dask-account', type=str, default='eecs', help='Slurm account for Dask worker jobs')
     p.add_argument('--dask-partition', type=str, default='share', help='Slurm partition for Dask worker jobs')
-    p.add_argument('--dask-processes-per-worker', type=int, default=1, help='Dask processes per worker job (default 1)')
+    p.add_argument('--dask-processes-per-worker', type=int, default=None,
+                   help='Dask processes per worker job; default equals --dask-worker-cores so nthreads=1')
     p.add_argument('--dask-timeout', type=float, default=600.0, help='Seconds to wait for Dask workers to start')
-    p.add_argument('--dask-chunk-size', type=int, default=10, help='How many genomes each Dask worker evaluates per task')
+    p.add_argument('--dask-chunk-size', type=int, default=None,
+                   help='How many genomes each Dask worker evaluates per task; default chooses ≈2×#processes chunks')
     p.add_argument('--dask-preempt-requeue', action='store_true', help='Request --requeue for worker jobs on preemptible partitions')
     args = p.parse_args()
 

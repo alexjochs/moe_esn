@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=ga_cpu
 #SBATCH --account=eecs  
-#SBATCH --partition=share           # high core-count partition for worker fan-out
-#SBATCH --time=4:00:00              # walltime HH:MM:SS
+#SBATCH --partition=share           
+#SBATCH --time=12:00:00              # walltime HH:MM:SS
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2           # head node just orchestrates Dask
@@ -43,15 +43,15 @@ export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export MPLBACKEND=Agg  # no GUI
 
-DASK_JOBS=${DASK_JOBS:-40}
+DASK_JOBS=${DASK_JOBS:-6}
 DASK_WORKER_CORES=${DASK_WORKER_CORES:-10}
 DASK_WORKER_MEM=${DASK_WORKER_MEM:-16GB}
-DASK_WORKER_WALLTIME=${DASK_WORKER_WALLTIME:-04:00:00}
+DASK_WORKER_WALLTIME=${DASK_WORKER_WALLTIME:-12:00:00}
 DASK_PARTITION=${DASK_PARTITION:-preempt}
 DASK_ACCOUNT=${DASK_ACCOUNT:-eecs}
 DASK_TIMEOUT=${DASK_TIMEOUT:-600}
-DASK_PROCESSES_PER_WORKER=${DASK_PROCESSES_PER_WORKER:-1}
-DASK_CHUNK_SIZE=${DASK_CHUNK_SIZE:-10}
+DASK_PROCESSES_PER_WORKER=${DASK_PROCESSES_PER_WORKER:-$DASK_WORKER_CORES}
+DASK_CHUNK_SIZE=${DASK_CHUNK_SIZE:-}
 DASK_PREEMPT_REQUEUE=${DASK_PREEMPT_REQUEUE:-1}
 
 # Convert SEEDS string into array for nice expansion below
@@ -61,6 +61,12 @@ read -r -a SEED_ARR <<< "$SEEDS_ENV"
 GA_EXTRA_FLAGS=()
 if [[ "$DASK_PREEMPT_REQUEUE" == "1" ]]; then
   GA_EXTRA_FLAGS+=("--dask-preempt-requeue")
+fi
+if [[ -n "$DASK_CHUNK_SIZE" ]]; then
+  GA_EXTRA_FLAGS+=("--dask-chunk-size" "$DASK_CHUNK_SIZE")
+fi
+if [[ -n "$DASK_PROCESSES_PER_WORKER" ]]; then
+  GA_EXTRA_FLAGS+=("--dask-processes-per-worker" "$DASK_PROCESSES_PER_WORKER")
 fi
 
 # ---------- Run ----------
@@ -74,9 +80,7 @@ python -u "single_reservoir_baseline.py" \
   --dask-worker-walltime "$DASK_WORKER_WALLTIME" \
   --dask-account "$DASK_ACCOUNT" \
   --dask-partition "$DASK_PARTITION" \
-  --dask-processes-per-worker "$DASK_PROCESSES_PER_WORKER" \
   --dask-timeout "$DASK_TIMEOUT" \
-  --dask-chunk-size "$DASK_CHUNK_SIZE" \
   "${GA_EXTRA_FLAGS[@]}" \
   --pop "$POP" \
   --gens "$GENS" \
