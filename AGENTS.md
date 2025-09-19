@@ -35,3 +35,11 @@ could use "segment_end" instead. It is fine for variables that follow the repres
 - Use Dask worker processes (not nested thread pools) for GA parallelism; align `--jobs` and `--dask-worker-cores` with the current population size to avoid idle allocations.
 - Leave `dask_chunk_size` unset; the GA launcher now derives chunk sizing internally from the active worker count.
 - Document any cluster-specific environment modules or scheduler quirks directly in the relevant batch scripts.
+
+## Dask Orchestration Notes
+- `moe_esn_batch.sh` submits a single orchestrator job on `share` with the SBATCH resources; it bootstraps a fresh venv, installs requirements, and exports `ESN_DASK_*` before launching `mixture_of_reservoirs_annotated.py`.
+- Inside `start_dask_client`, the Python script detects `SLURM_JOB_ID` and constructs a `dask_jobqueue.SLURMCluster` so every worker is a separate SLURM job submitted against `ESN_DASK_PARTITION` (defaults to `preempt`) with its own `--mem` derived from `ESN_DASK_WORKER_MEM`.
+- `cluster.scale(jobs=DASK_JOBS)` requests that many worker jobs; effective concurrency is `jobs * ESN_DASK_PROCESSES_PER_JOB`, so each process shares the worker memory reservation.
+- The log and scratch paths for workers live under `runs/<tag>/dask_logs` and `runs/<tag>/dask_tmp`, making it easy to inspect worker crashes (OOM, etc.).
+- If worker processes are OOM-killed, increase `ESN_DASK_WORKER_MEM` or reduce `ESN_DASK_PROCESSES_PER_JOB`; bumping SBATCH `--mem` only affects the orchestrator node and does not trickle down to worker submissions.
+- For local dev (no `SLURM_JOB_ID`), the script instead spins up a `LocalCluster` sized by `DASK_JOBS * DASK_PROCESSES_PER_JOB`, each with one thread per worker.
