@@ -5,7 +5,7 @@
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=10
 #SBATCH --mem=8G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
@@ -14,7 +14,7 @@ set -euo pipefail
 
 TAG=${TAG:-moe-$(date +%Y%m%d-%H%M%S)}
 OUTDIR=${OUTDIR:-$PWD/runs}
-ITERATIONS=${ITERATIONS:-10}
+ITERATIONS=${ITERATIONS:-30}
 
 mkdir -p "$OUTDIR"
 
@@ -28,11 +28,12 @@ source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-export OMP_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export VECLIB_MAXIMUM_THREADS=1
-export NUMEXPR_NUM_THREADS=1
+export ORCHESTRATOR_THREADS=${ORCHESTRATOR_THREADS:-${SLURM_CPUS_PER_TASK:-10}}
+export OMP_NUM_THREADS=$ORCHESTRATOR_THREADS
+export OPENBLAS_NUM_THREADS=$ORCHESTRATOR_THREADS
+export MKL_NUM_THREADS=$ORCHESTRATOR_THREADS
+export VECLIB_MAXIMUM_THREADS=$ORCHESTRATOR_THREADS
+export NUMEXPR_NUM_THREADS=$ORCHESTRATOR_THREADS
 export MPLBACKEND=Agg
 
 export ESN_DASK_JOBS=${ESN_DASK_JOBS:-20}
