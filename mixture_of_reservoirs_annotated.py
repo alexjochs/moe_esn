@@ -550,12 +550,15 @@ def start_dask_client(run_dir: Path):
         log_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
+        processes = max(1, DASK_PROCESSES_PER_JOB)
+        threads_per_process = max(1, DASK_WORKER_CORES // processes)
+
         job_script_prologue: List[str] = [
-            'export OMP_NUM_THREADS=1',
-            'export OPENBLAS_NUM_THREADS=1',
-            'export MKL_NUM_THREADS=1',
-            'export VECLIB_MAXIMUM_THREADS=1',
-            'export NUMEXPR_NUM_THREADS=1',
+            f'export OMP_NUM_THREADS={threads_per_process}',
+            f'export OPENBLAS_NUM_THREADS={threads_per_process}',
+            f'export MKL_NUM_THREADS={threads_per_process}',
+            f'export VECLIB_MAXIMUM_THREADS={threads_per_process}',
+            f'export NUMEXPR_NUM_THREADS={threads_per_process}',
         ]
         venv_path = os.environ.get('VIRTUAL_ENV')
         if venv_path:
@@ -566,7 +569,7 @@ def start_dask_client(run_dir: Path):
         cluster = SLURMCluster(
             queue=DASK_PARTITION,
             account=DASK_ACCOUNT,
-            processes=DASK_PROCESSES_PER_JOB,
+            processes=processes,
             cores=DASK_WORKER_CORES,
             memory=DASK_WORKER_MEM,
             walltime=DASK_WORKER_WALLTIME,
@@ -586,8 +589,9 @@ def start_dask_client(run_dir: Path):
             raise
     else:
         # Local fallback for development and debugging
+        threads_per_process = max(1, DASK_WORKER_CORES // max(1, DASK_PROCESSES_PER_JOB))
         total_workers = max(1, min(DASK_JOBS * DASK_PROCESSES_PER_JOB, os.cpu_count() or 1))
-        cluster = LocalCluster(n_workers=total_workers, threads_per_worker=1)
+        cluster = LocalCluster(n_workers=total_workers, threads_per_worker=threads_per_process)
         client = Client(cluster)
 
     return client, cluster
