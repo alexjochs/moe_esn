@@ -9,6 +9,7 @@
 #SBATCH --mem=32G
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
+#SBATCH --mail-type=ALL
 
 set -euo pipefail
 

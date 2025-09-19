@@ -551,14 +551,15 @@ def start_dask_client(run_dir: Path):
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         processes = max(1, DASK_PROCESSES_PER_JOB)
-        threads_per_process = max(1, DASK_WORKER_CORES // processes)
+        threads_for_blas = max(1, DASK_WORKER_CORES // processes)
+        dask_threads_per_worker = 1
 
         job_script_prologue: List[str] = [
-            f'export OMP_NUM_THREADS={threads_per_process}',
-            f'export OPENBLAS_NUM_THREADS={threads_per_process}',
-            f'export MKL_NUM_THREADS={threads_per_process}',
-            f'export VECLIB_MAXIMUM_THREADS={threads_per_process}',
-            f'export NUMEXPR_NUM_THREADS={threads_per_process}',
+            f'export OMP_NUM_THREADS={threads_for_blas}',
+            f'export OPENBLAS_NUM_THREADS={threads_for_blas}',
+            f'export MKL_NUM_THREADS={threads_for_blas}',
+            f'export VECLIB_MAXIMUM_THREADS={threads_for_blas}',
+            f'export NUMEXPR_NUM_THREADS={threads_for_blas}',
         ]
         venv_path = os.environ.get('VIRTUAL_ENV')
         if venv_path:
@@ -577,6 +578,7 @@ def start_dask_client(run_dir: Path):
             log_directory=str(log_dir),
             job_script_prologue=job_script_prologue,
             job_extra_directives=job_extra,
+            worker_extra_args=["--nthreads", str(dask_threads_per_worker)],
         )
         target_jobs = max(1, DASK_JOBS)
         cluster.scale(jobs=target_jobs)
@@ -589,9 +591,9 @@ def start_dask_client(run_dir: Path):
             raise
     else:
         # Local fallback for development and debugging
-        threads_per_process = max(1, DASK_WORKER_CORES // max(1, DASK_PROCESSES_PER_JOB))
+        dask_threads_per_worker = 1
         total_workers = max(1, min(DASK_JOBS * DASK_PROCESSES_PER_JOB, os.cpu_count() or 1))
-        cluster = LocalCluster(n_workers=total_workers, threads_per_worker=threads_per_process)
+        cluster = LocalCluster(n_workers=total_workers, threads_per_worker=dask_threads_per_worker)
         client = Client(cluster)
 
     return client, cluster
