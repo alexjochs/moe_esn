@@ -28,7 +28,7 @@ N_WINDOWS_PER_REGIME = 200
 
 NUM_TRAINING_ITERATIONS = 50
 HYPERPARAM_INTERPOLATION_POINTS = 20
-HYPERPARAM_SAMPLE_BUDGET = 400
+HYPERPARAM_SAMPLE_BUDGET = 200
 
 # Dask cluster defaults (tuned for the EECS preempt partition; tweak as needed).
 DASK_JOBS = int(os.environ.get("ESN_DASK_JOBS", 200))
@@ -447,6 +447,7 @@ def em_round_hyperparam_tuning(reservoirs: List[Reservoir],
                 lam,
                 horizon,
                 seed,
+                resources={"reservoir_eval": 1},
                 pure=False,
             )
             futures.append(future)
@@ -552,7 +553,6 @@ def start_dask_client(run_dir: Path):
 
         processes = max(1, DASK_PROCESSES_PER_JOB)
         threads_for_blas = max(1, DASK_WORKER_CORES // processes)
-        dask_threads_per_worker = 1
 
         job_script_prologue: List[str] = [
             f'export OMP_NUM_THREADS={threads_for_blas}',
@@ -578,7 +578,7 @@ def start_dask_client(run_dir: Path):
             log_directory=str(log_dir),
             job_script_prologue=job_script_prologue,
             job_extra_directives=job_extra,
-            worker_extra_args=["--nthreads", str(dask_threads_per_worker)],
+            worker_extra_args=["--resources", "reservoir_eval=1"],
         )
         target_jobs = max(1, DASK_JOBS)
         cluster.scale(jobs=target_jobs)
@@ -591,9 +591,12 @@ def start_dask_client(run_dir: Path):
             raise
     else:
         # Local fallback for development and debugging
-        dask_threads_per_worker = 1
         total_workers = max(1, min(DASK_JOBS * DASK_PROCESSES_PER_JOB, os.cpu_count() or 1))
-        cluster = LocalCluster(n_workers=total_workers, threads_per_worker=dask_threads_per_worker)
+        cluster = LocalCluster(
+            n_workers=total_workers,
+            threads_per_worker=max(1, DASK_WORKER_CORES // max(1, DASK_PROCESSES_PER_JOB)),
+            resources={"reservoir_eval": 1},
+        )
         client = Client(cluster)
 
     return client, cluster
