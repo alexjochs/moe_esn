@@ -8,8 +8,9 @@
 
 ## Development Workflow
 - `python -m venv venv && source venv/bin/activate`: bootstrap the isolated environment recommended for all work.
+- Always activate the repo virtualenv (`source venv/bin/activate`) before running Python tooling; automation here runs on macOS, while HPC GA jobs execute on Linux nodes.
 - `python -m pip install -r requirements.txt`: install runtime and Dask dependencies.
-- `python single_reservoir_baseline.py --ga --no-plots ...`: run local GA experiments; align flags with the corresponding batch script when sanity-checking a change.
+- `python ga_single_reservoir.py --jobs ...`: run GA experiments. This entry point expects every required flag (jobs, Dask resources, seeds, etc.) to be provided explicitly, matching `ga_single_batchfile.sh`.
 - `python -m compileall single_reservoir_baseline.py`: quick syntax check before launching long HPC jobs.
 - For smoke validation, run a tiny GA (`--pop 5 --gens 1 --seeds 42`) and inspect the emitted metrics.
 
@@ -32,4 +33,5 @@ could use "segment_end" instead. It is fine for variables that follow the repres
 
 ## HPC & Distributed Runs
 - Use Dask worker processes (not nested thread pools) for GA parallelism; align `--jobs` and `--dask-worker-cores` with the current population size to avoid idle allocations.
+- Leave `dask_chunk_size` unset; the GA launcher now derives chunk sizing internally from the active worker count.
 - Document any cluster-specific environment modules or scheduler quirks directly in the relevant batch scripts.

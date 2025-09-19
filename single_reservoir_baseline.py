@@ -4,6 +4,12 @@ the leaky-integrate method proposed by Jaeger for continuous time series work.
 
 The genetic algorithm entry point now lives in `ga_single_reservoir.py`. This
 module focuses solely on running and optionally plotting the baseline setup.
+
+best genome after 120 generations, population 60:
+namespace(C=0.046624243040634034, DECAY_RATE=1.0, target_rho=0.5737850795875341, 
+p_nonzero=0.00047618637769709894, w_scale=0.6284040028678406, p_in=0.1807399789443335,
+w_in_scale=0.18772886222512142, wback_scale=1.5, bias_value=0.2252049194491637,
+log10_alpha=-5.419977986835365)
 """
 
 import math
@@ -53,7 +59,7 @@ K = 1  # number of input "units"
 N = 1500  # number of network units (fixed per user request)
 L = 1  # number of output units
 
-def run_baseline(show_plots: bool = True):
+def run_baseline():
     rng = np.random.default_rng(42)
     genome = default_genome(C, DECAY_RATE)
     reservoir = build_reservoir(
@@ -101,9 +107,6 @@ def run_baseline(show_plots: bool = True):
     print("Baseline fitness:", fitness)
     print("Probes computed:", aux.get('probes', 0))
     _report_mem()
-
-    if not show_plots:
-        return
 
     starts = regime_start_indices_in_range(Y_labels, test_start, test_end)
     first_start_by_regime: Dict[int, int] = {}
@@ -169,9 +172,4 @@ def run_baseline(show_plots: bool = True):
     plt.show()
 
 if __name__ == "__main__":
-    show_plots = os.environ.get('DISPLAY', '') != ''
-    if not show_plots:
-        import matplotlib
-        matplotlib.use('Agg')
-
-    run_baseline(show_plots=show_plots)
+    run_baseline()

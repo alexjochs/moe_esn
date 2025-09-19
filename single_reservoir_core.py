@@ -54,6 +54,40 @@ def teacher_forced_states(reservoir: Reservoir,
     return states
 
 
+def fit_linear_readout(design_matrix: np.ndarray,
+                       targets: np.ndarray,
+                       alpha: float,
+                       sample_weight: Optional[np.ndarray] = None) -> np.ndarray:
+    """Fit ridge regression readout ``W_out`` solving ``design @ W_out.T`` ~= ``targets``.
+
+    Args:
+        design_matrix: Array shaped (num_samples, N) of reservoir states per time step.
+        targets: Array shaped (num_samples, L) or (num_samples,) of supervised outputs.
+        alpha: Ridge regularization strength.
+        sample_weight: Optional 1-D array of weights per sample.
+
+    Returns:
+        ``W_out`` shaped (L, N).
+    """
+    if design_matrix.ndim != 2:
+        raise ValueError("design_matrix must be 2-D (num_samples, num_features)")
+    if targets.ndim == 1:
+        targets = targets.reshape(-1, 1)
+    if targets.ndim != 2:
+        raise ValueError("targets must be 1-D or 2-D")
+    if design_matrix.shape[0] != targets.shape[0]:
+        raise ValueError("design_matrix and targets must share the same number of samples")
+    if sample_weight is not None and sample_weight.shape[0] != design_matrix.shape[0]:
+        raise ValueError("sample_weight must align with the number of samples")
+
+    ridge = Ridge(alpha=alpha, fit_intercept=False)
+    ridge.fit(design_matrix, targets, sample_weight=sample_weight)
+    coef = ridge.coef_.astype(np.float32)
+    if coef.ndim == 1:
+        coef = coef.reshape(1, -1)
+    return coef
+
+
 def cycle_starts(labels: np.ndarray) -> List[int]:
     """Return indices where a new Mackey-Glass cycle begins."""
     starts: List[int] = []
@@ -147,9 +181,7 @@ def train_readout(states: np.ndarray,
     Y_train = targets[:, train_idx].T
     z_train = np.arctanh(np.clip(Y_train, -0.999, 0.999))
 
-    ridge = Ridge(alpha=alpha, fit_intercept=False)
-    ridge.fit(X_train, z_train)
-    W_out = ridge.coef_
+    W_out = fit_linear_readout(X_train, z_train, alpha=alpha)
 
     return W_out, train_end
 

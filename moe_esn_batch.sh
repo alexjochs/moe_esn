@@ -1,0 +1,54 @@
+#!/bin/bash
+#SBATCH --job-name=moe_esn
+#SBATCH --account=eecs
+#SBATCH --partition=share
+#SBATCH --time=12:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=8G
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+
+set -euo pipefail
+
+TAG=${TAG:-moe-$(date +%Y%m%d-%H%M%S)}
+OUTDIR=${OUTDIR:-$PWD/runs}
+ITERATIONS=${ITERATIONS:-10}
+
+mkdir -p "$OUTDIR"
+
+module purge
+module load python/3.12 || true
+module load slurm || module load slurm/slurm || true
+
+VENV_DIR="$PWD/venv"
+python -m venv "$VENV_DIR"
+source "$VENV_DIR/bin/activate"
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export MPLBACKEND=Agg
+
+export ESN_DASK_JOBS=${ESN_DASK_JOBS:-20}
+export ESN_DASK_WORKER_CORES=${ESN_DASK_WORKER_CORES:-10}
+export ESN_DASK_WORKER_MEM=${ESN_DASK_WORKER_MEM:-8GB}
+export ESN_DASK_WORKER_WALLTIME=${ESN_DASK_WORKER_WALLTIME:-12:00:00}
+export ESN_DASK_PARTITION=${ESN_DASK_PARTITION:-preempt}
+export ESN_DASK_ACCOUNT=${ESN_DASK_ACCOUNT:-eecs}
+export ESN_DASK_REQUEUE=${ESN_DASK_REQUEUE:-1}
+export ESN_DASK_PROCESSES_PER_JOB=${ESN_DASK_PROCESSES_PER_JOB:-$ESN_DASK_WORKER_CORES}
+
+set -x
+python -u mixture_of_reservoirs_annotated.py \
+  --outdir "$OUTDIR" \
+  --tag "$TAG" \
+  --iterations "$ITERATIONS"
+set +x
+
+scontrol show job "$SLURM_JOB_ID" | egrep "TRES|MinMemoryCPU|NumCPUs|Nodes|Partition|Account" || true

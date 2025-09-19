@@ -2,6 +2,7 @@
 import numpy as np
 from typing import Dict, Tuple, List, Optional
 from reservoir import Reservoir, ReservoirParams
+from single_reservoir_core import teacher_forced_states, fit_linear_readout
 
 from dataset import generate_lorenz, generate_mackey_glass, generate_rossler, Regime
 
@@ -113,72 +114,80 @@ def soft_responsibilities(errors: np.ndarray, tau: float, prior: np.ndarray | No
     return resp
 
 
-def solve_weighted_ridge(S_list: list, b_list: list, weights: np.ndarray, lam: float) -> np.ndarray:
-    """
-    Solve weighted ridge regression for readout weights W_out.
-
-    Args:
-        S_list: list of (N,N) covariance matrices H.T @ H per sequence
-        b_list: list of (N,L) cross-covariance matrices H.T @ Y per sequence
-        weights: array shape (num_sequences,) weights per sequence
-        lam: regularization scalar
-
-    Returns:
-        W_out: array shape (N,L)
-    """
-    N = S_list[0].shape[0]
-    L = b_list[0].shape[1]
-
-    S_weighted = np.zeros((N, N), dtype=np.float32)
-    b_weighted = np.zeros((N, L), dtype=np.float32)
-
-    for S, b, w in zip(S_list, b_list, weights):
-        S_weighted += w * S
-        b_weighted += w * b
-
-    ridge = lam * np.eye(N, dtype=np.float32)
-    W_out = np.linalg.solve(S_weighted + ridge, b_weighted)
-    return W_out
-
-
-# -----------------------------------------------------------------------------
-# EM with readouts only: caching, init, and one round
-# -----------------------------------------------------------------------------
-
-def build_sufficient_stats(reservoirs: List[Reservoir], windows: List[Dict]) -> Tuple[List[List[np.ndarray]], List[List[np.ndarray]]]:
-    """
-    For each expert i and window s compute and cache (S_{s,i}, b_{s,i}).
-    Returns two nested lists:
-        S_all[i][s] = S_{s,i} (N,N)
-        b_all[i][s] = b_{s,i} (N,L)
-    """
-    S_all: List[List[np.ndarray]] = []
-    b_all: List[List[np.ndarray]] = []
+def build_window_designs(reservoirs: List[Reservoir], windows: List[Dict]) -> List[List[Dict[str, np.ndarray]]]:
+    """Cache teacher-forced states for the fit spans of each window and expert."""
+    designs: List[List[Dict[str, np.ndarray]]] = []
     for res in reservoirs:
-        cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
-        S_list_i: List[np.ndarray] = []
-        b_list_i: List[np.ndarray] = []
+        res_designs: List[Dict[str, np.ndarray]] = []
         for w in windows:
-            S, b = res.sufficient_stats(w, cache)
-            S_list_i.append(S)
-            b_list_i.append(b)
-        S_all.append(S_list_i)
-        b_all.append(b_list_i)
-    return S_all, b_all
+            targets = w['y'].astype(np.float32)
+            if targets.ndim == 1:
+                targets = targets.reshape(-1, res.L)
+            states = teacher_forced_states(res, targets.T)
+            wu = w['idx_warmup_end']
+            fit_end = w['idx_fit_end']
+            # Align states with labels: column t+1 corresponds to label at index t.
+            H_fit = states[:, wu + 1:fit_end + 1].T.astype(np.float32)
+            Y_fit = targets[wu:fit_end, :].astype(np.float32)
+            res_designs.append({'H_fit': H_fit, 'Y_fit': Y_fit})
+        designs.append(res_designs)
+    return designs
 
 
-def init_readouts_unweighted(S_all: List[List[np.ndarray]], b_all: List[List[np.ndarray]], lam: float) -> List[np.ndarray]:
-    """Solve unweighted ridge per expert using all windows equally. Returns list of W_out (N,L)."""
-    num_experts = len(S_all)
+def init_readouts_unweighted(designs: List[List[Dict[str, np.ndarray]]], lam: float) -> List[np.ndarray]:
+    """Solve unweighted ridge per expert using concatenated H/Y pairs."""
     W_out_list: List[np.ndarray] = []
-    for i in range(num_experts):
-        S_sum = np.sum(S_all[i], axis=0)
-        b_sum = np.sum(b_all[i], axis=0)
-        N = S_sum.shape[0]
-        ridge = lam * np.eye(N, dtype=np.float32)
-        W_out = np.linalg.solve(S_sum + ridge, b_sum)
+    for expert_idx, design_rows in enumerate(designs):
+        H_blocks: List[np.ndarray] = []
+        Y_blocks: List[np.ndarray] = []
+        for row in design_rows:
+            H_fit = row['H_fit']
+            if H_fit.size == 0:
+                continue
+            H_blocks.append(H_fit)
+            Y_blocks.append(row['Y_fit'])
+        if not H_blocks:
+            res = reservoirs[expert_idx]
+            W_out_list.append(np.zeros((res.L, res.N), dtype=np.float32))
+            continue
+        H_concat = np.vstack(H_blocks)
+        Y_concat = np.vstack(Y_blocks)
+        W_out = fit_linear_readout(H_concat, Y_concat, alpha=lam)
         W_out_list.append(W_out.astype(np.float32))
     return W_out_list
+
+
+def refit_readouts_weighted(designs: List[List[Dict[str, np.ndarray]]],
+                            responsibilities: np.ndarray,
+                            lam: float,
+                            prev_W: List[np.ndarray]) -> List[np.ndarray]:
+    """Refit each expert's readout using per-window responsibilities as sample weights."""
+    num_experts = len(designs)
+    W_out_new: List[np.ndarray] = []
+    for expert_idx in range(num_experts):
+        H_blocks: List[np.ndarray] = []
+        Y_blocks: List[np.ndarray] = []
+        sample_weights: List[np.ndarray] = []
+        for window_idx, row in enumerate(designs[expert_idx]):
+            weight = responsibilities[window_idx, expert_idx]
+            if weight <= 0.0:
+                continue
+            H_fit = row['H_fit']
+            if H_fit.size == 0:
+                continue
+            Y_fit = row['Y_fit']
+            H_blocks.append(H_fit)
+            Y_blocks.append(Y_fit)
+            sample_weights.append(np.full(H_fit.shape[0], weight, dtype=np.float32))
+        if not H_blocks:
+            W_out_new.append(prev_W[expert_idx])
+            continue
+        H_concat = np.vstack(H_blocks)
+        Y_concat = np.vstack(Y_blocks)
+        sw = np.concatenate(sample_weights) if sample_weights else None
+        W_out = fit_linear_readout(H_concat, Y_concat, alpha=lam, sample_weight=sw)
+        W_out_new.append(W_out.astype(np.float32))
+    return W_out_new
 
 
 def compute_errors_matrix(reservoirs: List[Reservoir], windows: List[Dict], W_out_list: List[np.ndarray], horizon: int = 10) -> np.ndarray:
@@ -193,7 +202,16 @@ def compute_errors_matrix(reservoirs: List[Reservoir], windows: List[Dict], W_ou
     return e
 
 
-def em_round_readouts_only(reservoirs: List[Reservoir], windows: List[Dict], S_all: List[List[np.ndarray]], b_all: List[List[np.ndarray]], W_out_list: List[np.ndarray], lam: float, tau: float, prior: Optional[np.ndarray] = None, ema_prev: Optional[np.ndarray] = None, alpha: float = 0.2, horizon: int = 10) -> Tuple[List[np.ndarray], np.ndarray, np.ndarray]:
+def em_round_readouts_only(reservoirs: List[Reservoir],
+                          windows: List[Dict],
+                          designs: List[List[Dict[str, np.ndarray]]],
+                          W_out_list: List[np.ndarray],
+                          lam: float,
+                          tau: float,
+                          prior: Optional[np.ndarray] = None,
+                          ema_prev: Optional[np.ndarray] = None,
+                          alpha: float = 0.2,
+                          horizon: int = 10) -> Tuple[List[np.ndarray], np.ndarray, np.ndarray]:
     """
     Perform one EM round:
       E-step: compute errors and responsibilities at the given horizon.
@@ -205,15 +223,7 @@ def em_round_readouts_only(reservoirs: List[Reservoir], windows: List[Dict], S_a
     r = soft_responsibilities(e, tau=tau, prior=prior, ema_prev=ema_prev, alpha=alpha)
 
     # M-step per expert
-    W_new: List[np.ndarray] = []
-    # Transpose nested lists to access per-window aligned stats quickly
-    # For each expert i, collect S_list_i and b_list_i in window order
-    for i in range(len(reservoirs)):
-        S_list_i = S_all[i]
-        b_list_i = b_all[i]
-        weights_i = r[:, i]
-        W_i = solve_weighted_ridge(S_list_i, b_list_i, weights_i, lam)
-        W_new.append(W_i.astype(np.float32))
+    W_new = refit_readouts_weighted(designs, r, lam, W_out_list)
 
     return W_new, r, e
 
@@ -229,14 +239,14 @@ L = 1   # number of output units
 # Expert parameter sets (three experts). Keep as provided but fixed.
 # -----------------------------------------------------------------------------
 # Reservoir 0 parameters
-SPECTRAL_RADIUS_0 = 0.8
-C_0 = 0.44           # reserved for future use
-DECAY_RATE_0 = 0.9
-W_IN_SCALE_0 = 0.14
-W_SCALE_0 = 0.4
+SPECTRAL_RADIUS_0 = 0.9
+C_0 = 0.60
+DECAY_RATE_0 = 0.85
+W_IN_SCALE_0 = 0.08
+W_SCALE_0 = 0.30
 W_BACK_SCALE_0 = 0.56
-W_IN_SPARSITY_0 = 0.5
-W_SPARSITY_0 = 0.9875
+W_IN_SPARSITY_0 = 0.60
+W_SPARSITY_0 = 0.990
 
 # Reservoir 1 parameters
 SPECTRAL_RADIUS_1 = 0.9
@@ -249,14 +259,14 @@ W_IN_SPARSITY_1 = 0.60
 W_SPARSITY_1 = 0.990
 
 # Reservoir 2 parameters
-SPECTRAL_RADIUS_2 = 0.7
-C_2 = 0.30
-DECAY_RATE_2 = 0.95
-W_IN_SCALE_2 = 0.20
-W_SCALE_2 = 0.50
+SPECTRAL_RADIUS_2 = 0.9
+C_2 = 0.60
+DECAY_RATE_2 = 0.85
+W_IN_SCALE_2 = 0.08
+W_SCALE_2 = 0.30
 W_BACK_SCALE_2 = 0.56
-W_IN_SPARSITY_2 = 0.40
-W_SPARSITY_2 = 0.985
+W_IN_SPARSITY_2 = 0.60
+W_SPARSITY_2 = 0.990
 
 # Instantiate three frozen reservoirs
 # TODO(alexochs): migrate mixture_of_reservoirs to the simplified helpers in single_reservoir_core.
@@ -293,19 +303,26 @@ reservoirs = [
     ), rng),
 ]
 
-def prepare_em_readouts_only(lam: float = 1e-3) -> Tuple[List[np.ndarray], List[List[np.ndarray]], List[List[np.ndarray]]]:
+def prepare_em_readouts_only(lam: float = 1e-3) -> Tuple[List[np.ndarray], List[List[Dict[str, np.ndarray]]]]:
     """
-    Precompute sufficient stats and initialize readouts equally. Returns:
-      W_out_list, S_all, b_all
+    Precompute teacher-forced design matrices and initialize readouts equally.
+    Returns ``(W_out_list, designs)``.
     """
-    S_all, b_all = build_sufficient_stats(reservoirs, TRAIN_WINDOWS)
-    W_out_list = init_readouts_unweighted(S_all, b_all, lam)
-    return W_out_list, S_all, b_all
+    designs = build_window_designs(reservoirs, TRAIN_WINDOWS)
+    W_out_list = init_readouts_unweighted(designs, lam)
+    return W_out_list, designs
 
 
-def run_one_em_round(W_out_list: List[np.ndarray], S_all: List[List[np.ndarray]], b_all: List[List[np.ndarray]], tau: float = 0.8, lam: float = 1e-3, horizon: int = 10, prior: Optional[np.ndarray] = None, ema_prev: Optional[np.ndarray] = None, alpha: float = 0.2):
+def run_one_em_round(W_out_list: List[np.ndarray],
+                     designs: List[List[Dict[str, np.ndarray]]],
+                     tau: float = 0.8,
+                     lam: float = 1e-3,
+                     horizon: int = 10,
+                     prior: Optional[np.ndarray] = None,
+                     ema_prev: Optional[np.ndarray] = None,
+                     alpha: float = 0.2):
     """Run one EM round on TRAIN_WINDOWS and return updated weights, responsibilities, and errors."""
-    return em_round_readouts_only(reservoirs, TRAIN_WINDOWS, S_all, b_all, W_out_list, lam=lam, tau=tau, prior=prior, ema_prev=ema_prev, alpha=alpha, horizon=horizon)
+    return em_round_readouts_only(reservoirs, TRAIN_WINDOWS, designs, W_out_list, lam=lam, tau=tau, prior=prior, ema_prev=ema_prev, alpha=alpha, horizon=horizon)
 
 
 if __name__ == "__main__":
@@ -321,9 +338,8 @@ if __name__ == "__main__":
     tau = 0.8 # temperature for softmax
     horizon = 10 # predict 10 steps out (for now)
 
-    print("Preparing sufficient stats and init readouts...")
     t0 = time.time()
-    W_out_list, S_all, b_all = prepare_em_readouts_only(lam=lam)
+    W_out_list, designs = prepare_em_readouts_only(lam=lam)
     t1 = time.time()
     print(f"Prepared in {t1 - t0:.2f}s. Windows: {len(TRAIN_WINDOWS)} | Experts: {len(reservoirs)} | N={N}")
 
@@ -332,7 +348,7 @@ if __name__ == "__main__":
 
     print("Running one EM round (readouts only)...")
     t2 = time.time()
-    W_out_list, r, e = run_one_em_round(W_out_list, S_all, b_all, tau=tau, lam=lam, horizon=horizon)
+    W_out_list, r, e = run_one_em_round(W_out_list, designs, tau=tau, lam=lam, horizon=horizon)
     t3 = time.time()
     print(f"EM round done in {t3 - t2:.2f}s")
 
