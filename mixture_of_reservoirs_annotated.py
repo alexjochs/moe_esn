@@ -39,6 +39,8 @@ DASK_PARTITION = os.environ.get("ESN_DASK_PARTITION", "preempt")
 DASK_ACCOUNT = os.environ.get("ESN_DASK_ACCOUNT", "eecs")
 DASK_REQUEUE = os.environ.get("ESN_DASK_REQUEUE", "1") != "0"
 DASK_PROCESSES_PER_JOB = int(os.environ.get("ESN_DASK_PROCESSES_PER_JOB", DASK_WORKER_CORES))
+ESN_DASK_TASK_RETIRES = int(os.environ.get("ESN_DASK_TASK_RETIRES", 25))
+DASK_ALLOWED_FAILURES = int(os.environ.get("ESN_DASK_ALLOWED_FAILURES", 100))
 
 RUN_LOG_FILENAME = "iteration_log.jsonl"
 
@@ -480,6 +482,7 @@ def em_round_hyperparam_tuning(reservoirs: List[Reservoir],
                 horizon,
                 seed,
                 resources={"reservoir_eval": 1},
+                retries=ESN_DASK_TASK_RETIRES,
                 pure=False,
             )
             futures.append(future)

@@ -46,6 +46,7 @@ export ESN_DASK_ACCOUNT=${ESN_DASK_ACCOUNT:-eecs}
 # Force worker jobs to be requeued after preemption so Dask maintains the pool.
 export ESN_DASK_REQUEUE=1
 export ESN_DASK_PROCESSES_PER_JOB=${ESN_DASK_PROCESSES_PER_JOB:-2}
+export DASK_DISTRIBUTED__SCHEDULER__ALLOWED_FAILURES=${DASK_DISTRIBUTED__SCHEDULER__ALLOWED_FAILURES:-100}
 
 set -x
 python -u mixture_of_reservoirs_annotated.py \

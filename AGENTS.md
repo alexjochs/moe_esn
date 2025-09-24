@@ -2,6 +2,7 @@
 
 ## Project Scope & Layout
 - This repository houses experiments on echo state networks (ESNs) and their architectural variants (`single_reservoir_baseline.py`, `mixture_of_reservoirs.py`, etc.).
+- Only `ga_single_reservoir.py` relies on a genetic algorithm; the other experiments, including `mixture_of_reservoirs_annotated.py`, do not use GA-based optimization.
 - Shared data-generation and reservoir utilities sit at the repo root (`dataset.py`, `reservoir.py`); changes here ripple through multiple experiments.
 - HPC orchestration scripts such as `ga_single_batchfile.sh` mirror the Python CLI interface and should be updated in lockstep with code changes.
 - Generated artifacts default to `runs/<tag>/`; keep intermediate logs and genomes inside those folders for reproducibility.
@@ -10,9 +11,9 @@
 - `python -m venv venv && source venv/bin/activate`: bootstrap the isolated environment recommended for all work.
 - Always activate the repo virtualenv (`source venv/bin/activate`) before running Python tooling; automation here runs on macOS, while HPC GA jobs execute on Linux nodes.
 - `python -m pip install -r requirements.txt`: install runtime and Dask dependencies.
-- `python ga_single_reservoir.py --jobs ...`: run GA experiments. This entry point expects every required flag (jobs, Dask resources, seeds, etc.) to be provided explicitly, matching `ga_single_batchfile.sh`.
+- For the GA-only entry point `ga_single_reservoir.py`, run `python ga_single_reservoir.py --jobs ...` with every required flag (jobs, Dask resources, seeds, etc.) matching `ga_single_batchfile.sh`.
 - `python -m compileall single_reservoir_baseline.py`: quick syntax check before launching long HPC jobs.
-- For smoke validation, run a tiny GA (`--pop 5 --gens 1 --seeds 42`) and inspect the emitted metrics.
+- When sanity-checking the GA workflow, run a tiny job (`--pop 5 --gens 1 --seeds 42`) and inspect the emitted metrics.
 
 ## Coding Style & Readability
 - Python follows 4-space indentation, snake_case identifiers, and CapWords for classes; match surrounding style.
@@ -22,8 +23,8 @@
 could use "segment_end" instead. It is fine for variables that follow the representations of Echo State Network math in the literature to have names like W, or X_n. 
 
 ## Experimentation Practices
-- Record significant runs by saving CLI invocations (e.g., append to `runs/<tag>/command.txt`) and attaching the resulting `best_genome*.json` files.
-- When updating genome parameter ranges or dataset regimes, describe the intent and expected behavior shift in the commit body.
+- Record significant runs by saving CLI invocations (e.g., append to `runs/<tag>/command.txt`); for GA runs, include the resulting `best_genome*.json` artifacts.
+- When adjusting GA genome parameter ranges or dataset regimes, describe the intent and expected behavior shift in the commit body.
 - Maintain deterministic seeds for comparative studies; introduce randomness intentionally and call it out in notes.
 
 ## Commit & Pull Request Guidelines
@@ -32,7 +33,7 @@ could use "segment_end" instead. It is fine for variables that follow the repres
 - PRs should highlight any required batch-script adjustments, resource implications, or new configuration flags.
 
 ## HPC & Distributed Runs
-- Use Dask worker processes (not nested thread pools) for GA parallelism; align `--jobs` and `--dask-worker-cores` with the current population size to avoid idle allocations.
+- For GA population sweeps, use Dask worker processes (not nested thread pools); align `--jobs` and `--dask-worker-cores` with the current population size to avoid idle allocations.
 - Leave `dask_chunk_size` unset; the GA launcher now derives chunk sizing internally from the active worker count.
 - Document any cluster-specific environment modules or scheduler quirks directly in the relevant batch scripts.
 
