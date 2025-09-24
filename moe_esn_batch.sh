@@ -43,7 +43,8 @@ export ESN_DASK_WORKER_MEM=${ESN_DASK_WORKER_MEM:-32GB}
 export ESN_DASK_WORKER_WALLTIME=${ESN_DASK_WORKER_WALLTIME:-12:00:00}
 export ESN_DASK_PARTITION=${ESN_DASK_PARTITION:-preempt}
 export ESN_DASK_ACCOUNT=${ESN_DASK_ACCOUNT:-eecs}
-export ESN_DASK_REQUEUE=${ESN_DASK_REQUEUE:-1}
+# Force worker jobs to be requeued after preemption so Dask maintains the pool.
+export ESN_DASK_REQUEUE=1
 export ESN_DASK_PROCESSES_PER_JOB=${ESN_DASK_PROCESSES_PER_JOB:-2}
 
 set -x

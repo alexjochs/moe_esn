@@ -40,6 +40,7 @@ could use "segment_end" instead. It is fine for variables that follow the repres
 - `moe_esn_batch.sh` submits a single orchestrator job on `share` with the SBATCH resources; it bootstraps a fresh venv, installs requirements, and exports `ESN_DASK_*` before launching `mixture_of_reservoirs_annotated.py`.
 - Inside `start_dask_client`, the Python script detects `SLURM_JOB_ID` and constructs a `dask_jobqueue.SLURMCluster` so every worker is a separate SLURM job submitted against `ESN_DASK_PARTITION` (defaults to `preempt`) with its own `--mem` derived from `ESN_DASK_WORKER_MEM`.
 - `cluster.scale(jobs=DASK_JOBS)` requests that many worker jobs; effective concurrency is `jobs * ESN_DASK_PROCESSES_PER_JOB`, so each process shares the worker memory reservation.
+- `ESN_DASK_REQUEUE` is forced to `1` in `moe_esn_batch.sh`, so every worker submission carries `--requeue`; preempted workers are re-queued automatically, but watch for fast crash loops when a worker fails deterministically.
 - The log and scratch paths for workers live under `runs/<tag>/dask_logs` and `runs/<tag>/dask_tmp`, making it easy to inspect worker crashes (OOM, etc.).
 - If worker processes are OOM-killed, increase `ESN_DASK_WORKER_MEM` or reduce `ESN_DASK_PROCESSES_PER_JOB`; bumping SBATCH `--mem` only affects the orchestrator node and does not trickle down to worker submissions.
 - For local dev (no `SLURM_JOB_ID`), the script instead spins up a `LocalCluster` sized by `DASK_JOBS * DASK_PROCESSES_PER_JOB`, each with one thread per worker.

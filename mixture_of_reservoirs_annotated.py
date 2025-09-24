@@ -42,6 +42,33 @@ DASK_PROCESSES_PER_JOB = int(os.environ.get("ESN_DASK_PROCESSES_PER_JOB", DASK_W
 
 RUN_LOG_FILENAME = "iteration_log.jsonl"
 
+# -----------------------------------------------------------------------------
+# Gating regularization & annealing (epsilon smoothing + load-balancing bias)
+# -----------------------------------------------------------------------------
+# Linear annealing from *_START to *_END over [ANNEAL_START_ITER, ANNEAL_END_ITER]
+ANNEAL_START_ITER = 1
+ANNEAL_END_ITER = 15
+
+TAU_START = 2.0
+TAU_END = 0.7
+
+EPSILON_START = 0.10   # uniform smoothing mass on responsibilities
+EPSILON_END = 0.00
+
+LAMBDA_LOAD_START = 1.0  # strength of load-balancing bias term
+LAMBDA_LOAD_END = 0.0
+
+def _linear_anneal(start: float, end: float, it: int, it0: int, it1: int) -> float:
+    """Linearly anneal from start to end as it runs from it0..it1 (clamped)."""
+    if it1 <= it0:
+        return end
+    if it <= it0:
+        return start
+    if it >= it1:
+        return end
+    t = (it - it0) / float(it1 - it0)
+    return (1.0 - t) * start + t * end
+
 
 def timestamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -63,16 +90,8 @@ def _gen_regime_window(regime_id: int, T: int, rng: np.random.Generator) -> np.n
     return y_std.reshape(T, 1).astype(np.float32)
 
 
-def _build_fixed_windows(n_per_regime: int, rng: np.random.Generator) -> Dict[str, list]:
-    """
-    Build pure-regime windows with index markers for warmup/fit/eval.
-    Returns dict with keys 'train' and 'test'; each is a list of dicts:
-      { 'y': (T,1), 'idx_warmup_end': W, 'idx_fit_end': W+T_FIT, 'idx_eval_end': T, 'regime': r, 'id': int }
-    Split is per-regime 70/30 without shuffling fuss.
-
-    god I hate chatGPT's variable naming.
-    n_per_regime is number of windows per regime (MG, Rossler, Lorenz)
-    """
+def _build_fixed_windows(n_per_regime: int, rng: np.random.Generator) -> List[Dict]:
+    """Build per-regime windows with warmup/fit/eval markers; returns train set only."""
     all_windows = []
     uid = 0
     for regime_number in (int(Regime.MACKEY_GLASS), int(Regime.LORENZ), int(Regime.ROSSLER)):
@@ -88,15 +107,12 @@ def _build_fixed_windows(n_per_regime: int, rng: np.random.Generator) -> Dict[st
             })
             uid += 1
 
-    # per-regime 70/30 split
-    train, test = [], []
+    train: List[Dict] = []
     for regime_number in (int(Regime.MACKEY_GLASS), int(Regime.LORENZ), int(Regime.ROSSLER)):
         regime_windows = [window for window in all_windows if window['regime'] == regime_number]
         n_train = int(0.7 * len(regime_windows))
         train += regime_windows[:n_train]
-        test  += regime_windows[n_train:]
-    # returns a dictionary of train windows and test windows, each window is a dictionary of data (Y) and some important indexes and regime id
-    return {'train': train, 'test': test}
+    return train
 
 
 # -----------------------------------------------------------------------------
@@ -104,44 +120,67 @@ def _build_fixed_windows(n_per_regime: int, rng: np.random.Generator) -> Dict[st
 # -----------------------------------------------------------------------------
 
 def compute_nrmse(preds: np.ndarray, targets: np.ndarray, eps: float = 1e-8) -> float:
-    """
-    Compute normalized root mean squared error (NRMSE)
-    """
+    """Compute normalized root mean squared error (NRMSE)."""
     mse = np.mean((preds - targets) ** 2)
     var = np.var(targets)
     return np.sqrt(mse / (var + eps))
 
-
-def soft_responsibilities(errors: np.ndarray, tau: float, prior: np.ndarray | None = None,
-                          previous_responsibilities: np.ndarray | None = None, alpha: float = 0.2) -> np.ndarray:
+# -------------------------------------------------------------------------
+# Responsibility computation with load-balancing and epsilon smoothing
+# -------------------------------------------------------------------------
+def compute_responsibilities_with_regularization(
+    errors: np.ndarray,
+    tau: float,
+    eps_uniform: float,
+    lambda_load: float,
+    prior: np.ndarray | None = None,
+    previous_responsibilities: np.ndarray | None = None,
+    alpha: float = 0.2,
+) -> np.ndarray:
     """
-    Convert per-sequence errors to soft responsibilities via temperature softmax.
-    Optionally multiply by prior and smooth with exponential moving average.
-
-    Args:
-        errors: shape (num_sequences, num_experts), error values per sequence and expert
-        tau: temperature parameter > 0
-        prior: optional prior weights shape (num_experts,)
-        ema_prev: optional previous EMA responsibilities shape (num_sequences, num_experts)
-        alpha: EMA smoothing factor in [0,1]
-
-    Returns:
-        responsibilities: shape (num_sequences, num_experts), rows sum to 1
+    Convert per-sequence errors to responsibilities with:
+      - temperature softmax
+      - optional prior over experts (log-space)
+      - optional EMA smoothing against previous responsibilities
+      - global load-balancing bias using current loads p_k
+      - epsilon uniform smoothing to avoid zeroing out experts
+    Args mirror soft_responsibilities plus:
+      eps_uniform: epsilon in [0,1] for uniform smoothing
+      lambda_load: strength for load-balancing bias (>=0)
     """
-    # Negative error scaled by temperature
-    logits = -errors / tau
+    num_sequences, num_experts = errors.shape
+    # Base logits from negative error
+    logits = -errors / max(tau, 1e-8)
     if prior is not None:
-        logits += np.log(prior + 1e-12)  # avoid log(0)
+        logits += np.log(prior + 1e-12)
+
+    # First softmax to get provisional responsibilities (for load estimate)
     max_logits = np.max(logits, axis=1, keepdims=True)
     exp_logits = np.exp(logits - max_logits)
-    responsibilities = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+    q = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
 
+    # Load-balancing bias: compute per-expert loads p_k and adjust logits
+    if lambda_load > 0.0:
+        p = q.mean(axis=0)  # shape [K]
+        target = 1.0 / float(num_experts)
+        bias = -lambda_load * (p - target)[None, :]  # broadcast over sequences
+        logits = logits + bias
+        # Recompute responsibilities after applying bias
+        max_logits = np.max(logits, axis=1, keepdims=True)
+        exp_logits = np.exp(logits - max_logits)
+        q = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+    # Optional EMA smoothing with previous responsibilities
     if previous_responsibilities is not None:
-        responsibilities = alpha * responsibilities + (1 - alpha) * previous_responsibilities
-        # re-normalize to ensure total responsiblities add to 1
-        responsibilities /= responsibilities.sum(axis=1, keepdims=True)
+        q = alpha * q + (1.0 - alpha) * previous_responsibilities
+        q /= q.sum(axis=1, keepdims=True)
 
-    return responsibilities
+    # Epsilon uniform smoothing to prevent starvation
+    if eps_uniform > 0.0:
+        q = (1.0 - eps_uniform) * q + (eps_uniform / float(num_experts))
+        q /= q.sum(axis=1, keepdims=True)
+
+    return q
 
 
 def build_state_target_pairs(reservoirs: List[Reservoir], windows: List[Dict]) -> List[List[Dict[str, np.ndarray]]]:
@@ -192,22 +231,15 @@ def refit_readouts_weighted(designs: List[List[Dict[str, np.ndarray]]],
         sample_weights: List[np.ndarray] = []
         for window_idx, row in enumerate(designs[expert_idx]):
             weight = responsibilities[window_idx, expert_idx]
-            if weight <= 0.0:
-                continue
             X_n_fit = row['X_n_fit']
-            if X_n_fit.size == 0:
-                continue
             Y_fit = row['Y_teach_fit']
             H_blocks.append(X_n_fit)
             Y_blocks.append(Y_fit)
             sample_weights.append(np.full(X_n_fit.shape[0], weight, dtype=np.float32))
-        if not H_blocks:
-            W_out_new.append(prev_W[expert_idx])
-            continue
         H_concat = np.vstack(H_blocks)
         Y_concat = np.vstack(Y_blocks)
-        sw = np.concatenate(sample_weights) if sample_weights else None
-        W_out = fit_linear_readout(H_concat, Y_concat, alpha=lam, sample_weight=sw)
+        sample_weight_array = np.concatenate(sample_weights)
+        W_out = fit_linear_readout(H_concat, Y_concat, alpha=lam, sample_weight=sample_weight_array)
         W_out_new.append(W_out.astype(np.float32))
     return W_out_new
 
@@ -326,8 +358,6 @@ def _evaluate_reservoir_candidate(reservoir_index: int,
     candidate_reservoir = Reservoir(N, K, L, params, candidate_rng)
 
     active_indices = np.where(responsibility_column > 1e-6)[0]
-    if active_indices.size == 0:
-        return float('inf')
 
     design_blocks: List[np.ndarray] = []
     target_blocks: List[np.ndarray] = []
@@ -335,23 +365,16 @@ def _evaluate_reservoir_candidate(reservoir_index: int,
 
     for window_index in active_indices:
         weight = float(responsibility_column[window_index])
-        if weight <= 0.0:
-            continue
         window = windows[window_index]
         targets = window['y'].astype(np.float32)
         states = teacher_forced_states(candidate_reservoir, targets.T)
         idx_warmup_end = window['idx_warmup_end']
         idx_fit_end = window['idx_fit_end']
         X_fit = states[:, idx_warmup_end + 1:idx_fit_end + 1].T.astype(np.float32)
-        if X_fit.size == 0:
-            continue
         Y_fit = targets[idx_warmup_end:idx_fit_end, :].astype(np.float32)
         design_blocks.append(X_fit)
         target_blocks.append(Y_fit)
         sample_weight_blocks.append(np.full(X_fit.shape[0], weight, dtype=np.float32))
-
-    if not design_blocks:
-        return float('inf')
 
     design_matrix = np.vstack(design_blocks)
     target_matrix = np.vstack(target_blocks)
@@ -362,16 +385,11 @@ def _evaluate_reservoir_candidate(reservoir_index: int,
     error_weights: List[float] = []
     for window_index in active_indices:
         weight = float(responsibility_column[window_index])
-        if weight <= 0.0:
-            continue
         window = windows[window_index]
         y_hat, y_true = candidate_reservoir.free_run(window, W_out, horizon=horizon)
         error_value = compute_nrmse(y_hat, y_true)
         errors.append(error_value)
         error_weights.append(weight)
-
-    if not errors:
-        return float('inf')
 
     weighted_error = float(np.average(errors, weights=error_weights))
     return weighted_error
@@ -383,6 +401,8 @@ def em_round_readouts_only(reservoirs: List[Reservoir],
                           W_out_list: List[np.ndarray],
                           lam: float,
                           tau: float,
+                          eps_uniform: float,
+                          lambda_load: float,
                           prior: Optional[np.ndarray] = None,
                           ema_prev: Optional[np.ndarray] = None,
                           alpha: float = 0.2,
@@ -395,7 +415,16 @@ def em_round_readouts_only(reservoirs: List[Reservoir],
     """
     # E-step
     sequence_error_matrix = compute_errors_matrix(reservoirs, windows, W_out_list, horizon=horizon)
-    r = soft_responsibilities(sequence_error_matrix, tau=tau, prior=prior, previous_responsibilities=ema_prev, alpha=alpha)
+    # Use regularized responsibilities (temperature, load balancing, epsilon, EMA)
+    r = compute_responsibilities_with_regularization(
+        sequence_error_matrix,
+        tau=tau,
+        eps_uniform=eps_uniform,
+        lambda_load=lambda_load,
+        prior=prior,
+        previous_responsibilities=ema_prev,
+        alpha=alpha,
+    )
 
     # M-step per expert
     W_new = refit_readouts_weighted(designs, r, lam, W_out_list)
@@ -416,6 +445,14 @@ def em_round_hyperparam_tuning(reservoirs: List[Reservoir],
 
     sample_budget = max(1, candidate_samples)
 
+    worker_threads = client.nthreads()
+
+    if worker_threads:
+        active_workers = len(worker_threads)
+        total_threads = int(sum(worker_threads.values()))
+        expected_workers = max(1, DASK_JOBS * DASK_PROCESSES_PER_JOB)
+        print(f"[Dask] Active workers: {active_workers}/{expected_workers} | total threads={total_threads}")
+
     windows_future = client.scatter(windows, broadcast=True)
 
     for reservoir_index, reservoir in enumerate(reservoirs):
@@ -427,11 +464,6 @@ def em_round_hyperparam_tuning(reservoirs: List[Reservoir],
             sample_budget=sample_budget,
             rng_seed=candidate_seed,
         )
-        if not candidate_params:
-            tuned_params.append(base_params)
-            tuned_errors.append(float('inf'))
-            continue
-
         responsibility_vector = responsibilities[:, reservoir_index].astype(np.float32)
         responsibilities_future = client.scatter(responsibility_vector, broadcast=True)
 
@@ -454,11 +486,6 @@ def em_round_hyperparam_tuning(reservoirs: List[Reservoir],
 
         print(f"Expert {reservoir_index}: evaluating {len(candidate_params)} candidates on Dask")
         candidate_errors = client.gather(futures)
-        if not candidate_errors:
-            tuned_params.append(base_params)
-            tuned_errors.append(float('inf'))
-            continue
-
         best_index = int(np.argmin(np.array(candidate_errors, dtype=float)))
         tuned_params.append(candidate_params[best_index])
         tuned_errors.append(float(candidate_errors[best_index]))
@@ -525,10 +552,10 @@ def _instantiate_reservoirs(param_list: List[ReservoirParams]) -> List[Reservoir
     return instantiated
 
 
-def reset_reservoir_bank() -> None:
-    global reservoir_param_configs, reservoirs
-    reservoir_param_configs = [ReservoirParams(**vars(p)) for p in RESERVOIR_PARAM_DEFAULTS]
-    reservoirs = _instantiate_reservoirs(reservoir_param_configs)
+def reset_reservoir_bank() -> Tuple[List[ReservoirParams], List[Reservoir]]:
+    configs = [ReservoirParams(**vars(p)) for p in RESERVOIR_PARAM_DEFAULTS]
+    bank = _instantiate_reservoirs(configs)
+    return configs, bank
 
 
 def start_dask_client(run_dir: Path):
@@ -622,28 +649,42 @@ def write_json(path: Path, payload: Dict) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
 
 
-reset_reservoir_bank()
-
-def prepare_em_readouts_only(lam: float) -> Tuple[List[np.ndarray], List[List[Dict[str, np.ndarray]]]]:
-    """
-    Precompute teacher-forced design matrices and initialize readouts equally.
-    Returns ``(W_out_list, designs)``.
-    """
-    state_target_pairs = build_state_target_pairs(reservoirs, train_windows)
+def prepare_em_readouts_only(reservoirs: List[Reservoir],
+                             windows: List[Dict],
+                             lam: float) -> Tuple[List[np.ndarray], List[List[Dict[str, np.ndarray]]]]:
+    """Precompute teacher-forced design matrices and initialize readouts equally."""
+    state_target_pairs = build_state_target_pairs(reservoirs, windows)
     W_out_list = init_readouts_unweighted(state_target_pairs, lam)
     return W_out_list, state_target_pairs
 
 
-def run_one_em_round(W_out_list: List[np.ndarray],
+def run_one_em_round(reservoirs: List[Reservoir],
+                     windows: List[Dict],
+                     W_out_list: List[np.ndarray],
                      designs: List[List[Dict[str, np.ndarray]]],
                      tau: float = 0.8,
                      lam: float = 1e-3,
+                     eps_uniform: float = 0.0,
+                     lambda_load: float = 0.0,
                      horizon: int = 10,
                      prior: Optional[np.ndarray] = None,
                      ema_prev: Optional[np.ndarray] = None,
                      alpha: float = 0.2):
-    """Run one EM round on TRAIN_WINDOWS and return updated weights, responsibilities, and errors."""
-    return em_round_readouts_only(reservoirs, train_windows, designs, W_out_list, lam=lam, tau=tau, prior=prior, ema_prev=ema_prev, alpha=alpha, horizon=horizon)
+    """Run one EM round and return updated weights, responsibilities, and errors."""
+    return em_round_readouts_only(
+        reservoirs,
+        windows,
+        designs,
+        W_out_list,
+        lam=lam,
+        tau=tau,
+        eps_uniform=eps_uniform,
+        lambda_load=lambda_load,
+        prior=prior,
+        ema_prev=ema_prev,
+        alpha=alpha,
+        horizon=horizon,
+    )
 
 def serialize_regime_means(regime_means: Dict[int, np.ndarray]) -> Dict[str, List[float]]:
     summary: Dict[str, List[float]] = {}
@@ -669,18 +710,12 @@ def serialize_regime_counts(regime_counts: Dict[int, int]) -> Dict[str, int]:
 
 def run_training_loop(iterations: int,
                       lam: float,
-                      tau: float,
                       horizon: int,
                       run_dir: Path) -> None:
     import time
 
-    global train_windows, test_windows, reservoirs, reservoir_param_configs
-
-    splits = _build_fixed_windows(N_WINDOWS_PER_REGIME, rng)
-    train_windows = splits['train']
-    test_windows = splits['test']
-
-    reset_reservoir_bank()
+    train_windows = _build_fixed_windows(N_WINDOWS_PER_REGIME, rng)
+    reservoir_param_configs, reservoirs = reset_reservoir_bank()
 
     client, cluster = start_dask_client(run_dir)
     log_path = run_dir / RUN_LOG_FILENAME
@@ -693,19 +728,30 @@ def run_training_loop(iterations: int,
                 iteration_label = f"Iter {iteration_index + 1}/{iterations}"
                 print(f"\n=== {iteration_label} ===")
 
+                # Anneal gating knobs for this iteration (1-indexed for readability)
+                iter_num = iteration_index + 1
+                tau_cur = _linear_anneal(TAU_START, TAU_END, iter_num, ANNEAL_START_ITER, ANNEAL_END_ITER)
+                eps_cur = _linear_anneal(EPSILON_START, EPSILON_END, iter_num, ANNEAL_START_ITER, ANNEAL_END_ITER)
+                lambda_load_cur = _linear_anneal(LAMBDA_LOAD_START, LAMBDA_LOAD_END, iter_num, ANNEAL_START_ITER, ANNEAL_END_ITER)
+
                 t0 = time.time()
-                W_out_list, state_target_pairs = prepare_em_readouts_only(lam=lam)
+                W_out_list, state_target_pairs = prepare_em_readouts_only(reservoirs, train_windows, lam=lam)
                 t1 = time.time()
                 print(f"[{iteration_label}] Prepared designs in {t1 - t0:.2f}s. Windows: {len(train_windows)} | Experts: {len(reservoirs)} | reservoir size={N}")
                 print(f"[{iteration_label}] W_out shapes: {[w.shape for w in W_out_list]}")
 
                 print(f"[{iteration_label}] Running EM (readouts only)...")
+                print(f"[{iteration_label}] Gating knobs: tau={tau_cur:.3f} | eps_uniform={eps_cur:.3f} | lambda_load={lambda_load_cur:.3f}")
                 t2 = time.time()
                 W_out_list, responsibilities, errors = run_one_em_round(
+                    reservoirs,
+                    train_windows,
                     W_out_list,
                     state_target_pairs,
-                    tau=tau,
+                    tau=tau_cur,
                     lam=lam,
+                    eps_uniform=eps_cur,
+                    lambda_load=lambda_load_cur,
                     horizon=horizon,
                     ema_prev=responsibilities_prev,
                     alpha=0.2,
@@ -773,6 +819,9 @@ def run_training_loop(iterations: int,
                         {field: float(getattr(params, field)) for field in vars(params)}
                         for params in reservoir_param_configs
                     ],
+                    'tau_cur': float(tau_cur),
+                    'eps_uniform': float(eps_cur),
+                    'lambda_load': float(lambda_load_cur),
                 }
                 log_file.write(json.dumps(iteration_record) + '\n')
                 log_file.flush()
@@ -780,8 +829,7 @@ def run_training_loop(iterations: int,
                 responsibilities_prev = responsibilities
     finally:
         client.close()
-        if cluster is not None:
-            cluster.close()
+        cluster.close()
 
 
 if __name__ == "__main__":
@@ -798,7 +846,9 @@ if __name__ == "__main__":
         'run_dir': str(run_dir),
         'iterations': int(args.iterations),
         'lam': 1e-3,
-        'tau': 0.8,
+        'tau': {'start': TAU_START, 'end': TAU_END, 'anneal_iters': [ANNEAL_START_ITER, ANNEAL_END_ITER]},
+        'epsilon_uniform': {'start': EPSILON_START, 'end': EPSILON_END},
+        'lambda_load': {'start': LAMBDA_LOAD_START, 'end': LAMBDA_LOAD_END},
         'horizon': 10,
         'dask': {
             'jobs': DASK_JOBS,
@@ -815,7 +865,6 @@ if __name__ == "__main__":
     run_training_loop(
         iterations=int(args.iterations),
         lam=1e-3,
-        tau=0.8,
         horizon=10,
         run_dir=run_dir,
     )
