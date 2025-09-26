@@ -135,14 +135,12 @@ def compute_responsibilities_with_regularization(
     tau: float,
     eps_uniform: float,
     lambda_load: float,
-    prior: np.ndarray | None = None,
     previous_responsibilities: np.ndarray | None = None,
     alpha: float = 0.2,
 ) -> np.ndarray:
     """
     Convert per-sequence errors to responsibilities with:
       - temperature softmax
-      - optional prior over experts (log-space)
       - optional EMA smoothing against previous responsibilities
       - global load-balancing bias using current loads p_k
       - epsilon uniform smoothing to avoid zeroing out experts
@@ -153,8 +151,6 @@ def compute_responsibilities_with_regularization(
     num_sequences, num_experts = errors.shape
     # Base logits from negative error
     logits = -errors / max(tau, 1e-8)
-    if prior is not None:
-        logits += np.log(prior + 1e-12)
 
     # First softmax to get provisional responsibilities (for load estimate)
     max_logits = np.max(logits, axis=1, keepdims=True)
@@ -405,7 +401,6 @@ def em_round_readouts_only(reservoirs: List[Reservoir],
                           tau: float,
                           eps_uniform: float,
                           lambda_load: float,
-                          prior: Optional[np.ndarray] = None,
                           ema_prev: Optional[np.ndarray] = None,
                           alpha: float = 0.2,
                           horizon: int = 10) -> Tuple[List[np.ndarray], np.ndarray, np.ndarray]:
@@ -423,7 +418,6 @@ def em_round_readouts_only(reservoirs: List[Reservoir],
         tau=tau,
         eps_uniform=eps_uniform,
         lambda_load=lambda_load,
-        prior=prior,
         previous_responsibilities=ema_prev,
         alpha=alpha,
     )
@@ -670,7 +664,6 @@ def run_one_em_round(reservoirs: List[Reservoir],
                      eps_uniform: float = 0.0,
                      lambda_load: float = 0.0,
                      horizon: int = 10,
-                     prior: Optional[np.ndarray] = None,
                      ema_prev: Optional[np.ndarray] = None,
                      alpha: float = 0.2):
     """Run one EM round and return updated weights, responsibilities, and errors."""
@@ -683,7 +676,6 @@ def run_one_em_round(reservoirs: List[Reservoir],
         tau=tau,
         eps_uniform=eps_uniform,
         lambda_load=lambda_load,
-        prior=prior,
         ema_prev=ema_prev,
         alpha=alpha,
         horizon=horizon,
