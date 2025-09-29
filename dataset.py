@@ -278,20 +278,31 @@ if __name__ == "__main__":
     # PSD comparison
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     freqs_mg, Pxx_mg = welch(mg_std, fs=1, nperseg=256)
+    freqs_lor, Pxx_lor = welch(lorenz_std, fs=1, nperseg=256)
+    freqs_ros, Pxx_ros = welch(rossler_std, fs=1, nperseg=256)
+
+    # Align PSD subplot scaling so cross-series differences are visually comparable
+    positive_psd = np.concatenate([
+        Pxx_mg[Pxx_mg > 0],
+        Pxx_lor[Pxx_lor > 0],
+        Pxx_ros[Pxx_ros > 0],
+    ])
+    y_min, y_max = positive_psd.min(), positive_psd.max()
+
     axes[0].semilogy(freqs_mg, Pxx_mg)
     axes[0].set_title("Mackey-Glass PSD")
     axes[0].set_xlabel("Frequency")
     axes[0].set_ylabel("Power Spectral Density")
-    freqs_lor, Pxx_lor = welch(lorenz_std, fs=1, nperseg=256)
     axes[1].semilogy(freqs_lor, Pxx_lor)
     axes[1].set_title("Lorenz x PSD")
     axes[1].set_xlabel("Frequency")
     axes[1].set_ylabel("Power Spectral Density")
-    freqs_ros, Pxx_ros = welch(rossler_std, fs=1, nperseg=256)
     axes[2].semilogy(freqs_ros, Pxx_ros)
     axes[2].set_title("Rössler x PSD")
     axes[2].set_xlabel("Frequency")
     axes[2].set_ylabel("Power Spectral Density")
+    for ax in axes:
+        ax.set_ylim(y_min, y_max)
     plt.tight_layout()
     plt.show()
 

@@ -232,7 +232,7 @@ def em_round_readouts_only(reservoirs: List[Reservoir],
 # Model dimensions (shared across experts)
 # -----------------------------------------------------------------------------
 K = 1   # number of input units
-N = 500 # number of reservoir units
+N = 100 # number of reservoir units
 L = 1   # number of output units
 
 # -----------------------------------------------------------------------------

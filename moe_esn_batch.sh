@@ -7,13 +7,13 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --output=%x-%j.out
-#SBATCH --error=%x-%j.err
+#SBATCH --output=%x-n100-%j.out
+#SBATCH --error=%x-n100-%j.err
 #SBATCH --mail-type=ALL
 
 set -euo pipefail
 
-TAG=${TAG:-moe-$(date +%Y%m%d-%H%M%S)}
+TAG=${TAG:-moe-n100-$(date +%Y%m%d-%H%M%S)}
 OUTDIR=${OUTDIR:-$PWD/runs}
 ITERATIONS=${ITERATIONS:-30}
 
