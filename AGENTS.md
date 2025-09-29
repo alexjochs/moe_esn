@@ -2,7 +2,7 @@
 
 ## Project Scope & Layout
 - This repository houses experiments on echo state networks (ESNs) and their architectural variants (`single_reservoir_baseline.py`, `mixture_of_reservoirs.py`, etc.).
-- Only `ga_single_reservoir.py` relies on a genetic algorithm; the other experiments, including `mixture_of_reservoirs_annotated.py`, do not use GA-based optimization.
+- Only `ga_single_reservoir.py` relies on a genetic algorithm; the other experiments, including `mixture_of_reservoirs.py`, do not use GA-based optimization.
 - Shared data-generation and reservoir utilities sit at the repo root (`dataset.py`, `reservoir.py`); changes here ripple through multiple experiments.
 - HPC orchestration scripts such as `ga_single_batchfile.sh` mirror the Python CLI interface and should be updated in lockstep with code changes.
 - Generated artifacts default to `runs/<tag>/`; keep intermediate logs and genomes inside those folders for reproducibility.
@@ -38,7 +38,7 @@ could use "segment_end" instead. It is fine for variables that follow the repres
 - Document any cluster-specific environment modules or scheduler quirks directly in the relevant batch scripts.
 
 ## Dask Orchestration Notes
-- `moe_esn_batch.sh` submits a single orchestrator job on `share` with the SBATCH resources; it bootstraps a fresh venv, installs requirements, and exports `ESN_DASK_*` before launching `mixture_of_reservoirs_annotated.py`.
+- `moe_esn_batch.sh` submits a single orchestrator job on `share` with the SBATCH resources; it bootstraps a fresh venv, installs requirements, and exports `ESN_DASK_*` before launching `mixture_of_reservoirs.py`.
 - Inside `start_dask_client`, the Python script detects `SLURM_JOB_ID` and constructs a `dask_jobqueue.SLURMCluster` so every worker is a separate SLURM job submitted against `ESN_DASK_PARTITION` (defaults to `preempt`) with its own `--mem` derived from `ESN_DASK_WORKER_MEM`.
 - `cluster.scale(jobs=DASK_JOBS)` requests that many worker jobs; effective concurrency is `jobs * ESN_DASK_PROCESSES_PER_JOB`, so each process shares the worker memory reservation.
 - `ESN_DASK_REQUEUE` is forced to `1` in `moe_esn_batch.sh`, so every worker submission carries `--requeue`; preempted workers are re-queued automatically, but watch for fast crash loops when a worker fails deterministically.

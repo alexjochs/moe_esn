@@ -49,7 +49,7 @@ export ESN_DASK_PROCESSES_PER_JOB=${ESN_DASK_PROCESSES_PER_JOB:-2}
 export DASK_DISTRIBUTED__SCHEDULER__ALLOWED_FAILURES=${DASK_DISTRIBUTED__SCHEDULER__ALLOWED_FAILURES:-100}
 
 set -x
-python -u mixture_of_reservoirs_annotated.py \
+python -u mixture_of_reservoirs.py \
   --outdir "$OUTDIR" \
   --tag "$TAG" \
   --iterations "$ITERATIONS"
