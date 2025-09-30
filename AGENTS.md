@@ -4,17 +4,16 @@
 - This repository houses experiments on echo state networks (ESNs) and their architectural variants (`single_reservoir_baseline.py`, `mixture_of_reservoirs.py`, etc.).
 - Only `ga_single_reservoir.py` relies on a genetic algorithm; the other experiments, including `mixture_of_reservoirs.py`, do not use GA-based optimization.
 - Shared data-generation and reservoir utilities sit at the repo root (`dataset.py`, `reservoir.py`); changes here ripple through multiple experiments.
+- The `moe/` package now holds windowing, gating, readout EM, Dask, and reservoir-bank helpers extracted from `mixture_of_reservoirs.py` so the script stays focused on the grid-search workflow.
 - HPC orchestration scripts such as `ga_single_batchfile.sh` mirror the Python CLI interface and should be updated in lockstep with code changes.
 - Generated artifacts default to `runs/<tag>/`; keep intermediate logs and genomes inside those folders for reproducibility.
 
 ## Development Workflow
-- `python -m venv venv && source venv/bin/activate`: bootstrap the isolated environment recommended for all work.
-- Always activate the repo virtualenv (`source venv/bin/activate`) before running Python tooling; automation here runs on macOS, while HPC GA jobs execute on Linux nodes.
-- `python -m pip install -r requirements.txt`: install runtime and Dask dependencies.
-- For the GA-only entry point `ga_single_reservoir.py`, run `python ga_single_reservoir.py --jobs ...` with every required flag (jobs, Dask resources, seeds, etc.) matching `ga_single_batchfile.sh`.
-- `python -m compileall single_reservoir_baseline.py`: quick syntax check before launching long HPC jobs.
-- When sanity-checking the GA workflow, run a tiny job (`--pop 5 --gens 1 --seeds 42`) and inspect the emitted metrics.
-
+- Create/activate the repo virtualenv (`python -m venv venv && source venv/bin/activate`) before running any Python entry point.
+- `ga_single_reservoir.py` drives the genetic algorithm experiment; follow `ga_single_batchfile.sh` for required flags (`--jobs`, Dask settings, seeds, etc.) and run small sanity checks locally (`--pop 5 --gens 1 --seeds 42`).
+- `mixture_of_reservoirs.py` is a separate grid-search workflow that relies on Dask + SLURM; match `moe_esn_batch.sh` when launching it on the cluster. It does not use the GA code path.
+- Install dependencies via `python -m pip install -r requirements.txt` inside the virtualenv.
+- Use `python -m compileall <script>` for quick syntax validation before submitting long HPC jobs.
 ## Coding Style & Readability
 - Python follows 4-space indentation, snake_case identifiers, and CapWords for classes; match surrounding style.
 - Prioritize readability over cleverness—document rationale for experimental knobs, cite papers when relevant, and note assumptions about data scales or ESN hyperparameters.
@@ -33,6 +32,7 @@ could use "segment_end" instead. It is fine for variables that follow the repres
 - PRs should highlight any required batch-script adjustments, resource implications, or new configuration flags.
 
 ## HPC & Distributed Runs
+- The mixture-of-reservoirs driver remains a grid-search workflow that assumes SLURM+Dask resources; keep the HPC batch script (`moe_esn_batch.sh`) aligned with any CLI-visible behavior.
 - For GA population sweeps, use Dask worker processes (not nested thread pools); align `--jobs` and `--dask-worker-cores` with the current population size to avoid idle allocations.
 - Leave `dask_chunk_size` unset; the GA launcher now derives chunk sizing internally from the active worker count.
 - Document any cluster-specific environment modules or scheduler quirks directly in the relevant batch scripts.
