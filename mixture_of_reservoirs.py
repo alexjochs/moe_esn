@@ -21,7 +21,7 @@ rng = np.random.default_rng(42)
 #   Window spec: [warmup | teacher-forced fit | eval (free-run)]
 # -----------------------------------------------------------------------------
 WARMUP_LEN = 200                # warmup length
-TEACHER_FORCED_LEN = 400            # teacher-forced fit span; set to 0 to disable
+TEACHER_FORCED_LEN = 200            # teacher-forced fit span; set to 0 to disable
 MAX_EVAL_HORIZON = 50               # extra tail so free-run rollouts have targets
 WINDOW_LEN_TOTAL = WARMUP_LEN + TEACHER_FORCED_LEN + MAX_EVAL_HORIZON
 N_WINDOWS_PER_REGIME = 200
@@ -298,6 +298,7 @@ def _generate_param_candidates(base_params: ReservoirParams,
         _candidate_param_values(base_params.w_back_scale, (0.2, 0.8), interpolation_points),
         _candidate_param_values(base_params.w_in_scale, (0.02, 0.12), interpolation_points),
         _candidate_param_values(base_params.w_in_sparsity, (0.3, 0.9), interpolation_points, clip_to_unit=True),
+        _candidate_param_values(base_params.bias_value, (-0.2, 0.2), interpolation_points),  # bias amplitude sweep
     ]
 
     # Total combinations if we enumerated the full Cartesian grid.
@@ -313,6 +314,7 @@ def _generate_param_candidates(base_params: ReservoirParams,
             w_back_scale=float(values[5]),
             w_in_scale=float(values[6]),
             w_in_sparsity=float(values[7]),
+            bias_value=float(values[8]),
         )
 
     samples: Dict[Tuple[float, ...], ReservoirParams] = {}
@@ -337,6 +339,7 @@ def _generate_param_candidates(base_params: ReservoirParams,
         round(base_params.w_back_scale, 6),
         round(base_params.w_in_scale, 6),
         round(base_params.w_in_sparsity, 6),
+        round(base_params.bias_value, 6),
     )
     samples.setdefault(baseline_tuple, ReservoirParams(**vars(base_params)))
 
@@ -516,6 +519,7 @@ RESERVOIR_PARAM_DEFAULTS: List[ReservoirParams] = [
         w_back_scale=0.56,
         w_in_scale=0.08,
         w_in_sparsity=0.60,
+        bias_value=0.0,
     ),
     ReservoirParams(
         spectral_radius=0.9,
@@ -526,6 +530,7 @@ RESERVOIR_PARAM_DEFAULTS: List[ReservoirParams] = [
         w_back_scale=0.56,
         w_in_scale=0.08,
         w_in_sparsity=0.60,
+        bias_value=0.0,
     ),
     ReservoirParams(
         spectral_radius=0.9,
@@ -536,6 +541,7 @@ RESERVOIR_PARAM_DEFAULTS: List[ReservoirParams] = [
         w_back_scale=0.56,
         w_in_scale=0.08,
         w_in_sparsity=0.60,
+        bias_value=0.0,
     ),
 ]
 
