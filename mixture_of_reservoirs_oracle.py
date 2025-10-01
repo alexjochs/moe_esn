@@ -6,12 +6,16 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 
 from dataset import Regime
-from reservoir import ReservoirParams
+from reservoir import Reservoir, ReservoirParams
 
-from moe.data_windows import _build_fixed_windows
+from moe.data_windows import _build_fixed_windows, _gen_regime_window
 from moe.dask_utils import start_dask_client
 from moe.gating import (
     compute_responsibilities_with_regularization,
@@ -44,6 +48,10 @@ TEACHER_FORCED_LEN = 200            # teacher-forced fit span; set to 0 to disab
 MAX_EVAL_HORIZON = 50               # extra tail so free-run rollouts have targets
 WINDOW_LEN_TOTAL = WARMUP_LEN + TEACHER_FORCED_LEN + MAX_EVAL_HORIZON
 N_WINDOWS_PER_REGIME = 200
+
+FREE_RUN_DIAGNOSTIC_HORIZON = 500
+DIAGNOSTIC_ITERATIONS = {10, 20, 30}
+DIAGNOSTIC_DIRNAME = "free_run_diagnostics"
 
 NUM_TRAINING_ITERATIONS = 50
 HYPERPARAM_INTERPOLATION_POINTS = 10
@@ -122,6 +130,65 @@ def _build_oracle_responsibilities(windows: List[Dict], num_experts: int) -> np.
     return responsibilities
 
 
+def _build_diagnostic_windows(horizon: int) -> Dict[int, Dict]:
+    """Construct deterministic windows for long-horizon diagnostics by regime."""
+    total_length = WARMUP_LEN + TEACHER_FORCED_LEN + horizon
+    diag_rng = np.random.default_rng(314159)
+    windows: Dict[int, Dict] = {}
+    for regime_id in (int(Regime.MACKEY_GLASS), int(Regime.ROSSLER), int(Regime.LORENZ)):
+        y = _gen_regime_window(regime_id, total_length, diag_rng)
+        windows[regime_id] = {
+            'y': y,
+            'idx_warmup_end': WARMUP_LEN,
+            'idx_fit_end': WARMUP_LEN + TEACHER_FORCED_LEN,
+            'idx_eval_end': total_length,
+            'regime': regime_id,
+            'id': f'diagnostic_{regime_id}',
+        }
+    return windows
+
+
+def _plot_free_run_diagnostics(iteration: int,
+                               run_dir: Path,
+                               reservoirs: List[Reservoir],
+                               readouts: List[np.ndarray],
+                               windows_by_regime: Dict[int, Dict],
+                               horizon: int) -> None:
+    """Save per-expert free-run rollouts across regimes without rendering to screen."""
+    diagnostic_dir = (run_dir / DIAGNOSTIC_DIRNAME)
+    diagnostic_dir.mkdir(parents=True, exist_ok=True)
+
+    regime_sequence = [
+        (int(Regime.MACKEY_GLASS), "Mackey-Glass"),
+        (int(Regime.ROSSLER), "Rossler"),
+        (int(Regime.LORENZ), "Lorenz"),
+    ]
+    time_axis = np.arange(horizon)
+
+    for expert_index, (reservoir, w_out) in enumerate(zip(reservoirs, readouts)):
+        fig, axes = plt.subplots(1, len(regime_sequence), figsize=(18, 5), sharey=True)
+        axes = np.atleast_1d(axes)
+
+        for axis, (regime_id, regime_label) in zip(axes, regime_sequence):
+            window = windows_by_regime[regime_id]
+            y_hat, y_true = reservoir.free_run(window, w_out, horizon=horizon)
+            y_true_flat = y_true.reshape(-1)
+            y_hat_flat = y_hat.reshape(-1)
+            axis.plot(time_axis, y_true_flat, label="target", linewidth=1.0)
+            axis.plot(time_axis, y_hat_flat, label="free-run", linewidth=1.0)
+            axis.set_title(regime_label)
+            axis.set_xlabel("step")
+            if axis is axes[0]:
+                axis.set_ylabel("value")
+
+        axes[0].legend(loc="upper right")
+        fig.suptitle(f"Iteration {iteration}: Expert {expert_index} free-run diagnostics")
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        output_path = diagnostic_dir / f"iter_{iteration:02d}_expert_{expert_index}.png"
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Iterative mixture-of-experts ESN trainer")
     parser.add_argument('--tag', type=str, required=True, help='run identifier for logs and artifacts')
@@ -151,6 +218,7 @@ def run_training_loop(iterations: int,
         WINDOW_LEN_TOTAL,
     )
     reservoir_param_configs, reservoirs = reset_reservoir_bank(N, K, L)
+    diagnostic_windows = _build_diagnostic_windows(FREE_RUN_DIAGNOSTIC_HORIZON)
 
     client, cluster = start_dask_client(
         run_dir,
@@ -241,6 +309,16 @@ def run_training_loop(iterations: int,
 
                 errors_after_refit = compute_errors_matrix(reservoirs, train_windows, W_out_list, horizon=horizon)
                 print(f"[{iteration_label}] Mean NRMSE@{horizon} per expert after oracle refit: {errors_after_refit.mean(axis=0)}")
+
+                if iter_num in DIAGNOSTIC_ITERATIONS:
+                    _plot_free_run_diagnostics(
+                        iter_num,
+                        run_dir,
+                        reservoirs,
+                        W_out_list,
+                        diagnostic_windows,
+                        FREE_RUN_DIAGNOSTIC_HORIZON,
+                    )
 
                 tuned_params, tuned_errors = em_round_hyperparam_tuning(
                     reservoirs,
