@@ -44,7 +44,7 @@ rng = np.random.default_rng(42)
 #   Window spec: [warmup | teacher-forced fit | eval (free-run)]
 # -----------------------------------------------------------------------------
 WARMUP_LEN = 200                # warmup length
-TEACHER_FORCED_LEN = 200            # teacher-forced fit span; set to 0 to disable
+TEACHER_FORCED_LEN = 300            # teacher-forced fit span; set to 0 to disable
 MAX_EVAL_HORIZON = 50               # extra tail so free-run rollouts have targets
 WINDOW_LEN_TOTAL = WARMUP_LEN + TEACHER_FORCED_LEN + MAX_EVAL_HORIZON
 N_WINDOWS_PER_REGIME = 200
@@ -54,8 +54,8 @@ DIAGNOSTIC_ITERATIONS = {10, 20, 30}
 DIAGNOSTIC_DIRNAME = "free_run_diagnostics"
 
 NUM_TRAINING_ITERATIONS = 50
-HYPERPARAM_INTERPOLATION_POINTS = 10
-HYPERPARAM_SAMPLE_BUDGET = 400
+HYPERPARAM_INTERPOLATION_POINTS = 8
+HYPERPARAM_SAMPLE_BUDGET = 2000
 
 # Dask cluster defaults (tuned for the EECS preempt partition; tweak as needed).
 DASK_JOBS = int(os.environ.get("ESN_DASK_JOBS", 200))
