@@ -24,15 +24,15 @@ def _generate_param_candidates(base_params: ReservoirParams,
     rng_local = np.random.default_rng(rng_seed)
 
     grid_axes = [
-        _candidate_param_values(base_params.spectral_radius, (0.5, 1.2), interpolation_points),
-        _candidate_param_values(base_params.C, (0.4, 1.0), interpolation_points, clip_to_unit=True),
-        _candidate_param_values(base_params.decay_rate, (0.6, 0.99), interpolation_points, clip_to_unit=True),
-        _candidate_param_values(base_params.w_scale, (0.15, 0.5), interpolation_points),
-        _candidate_param_values(base_params.w_sparsity, (0.94, 0.995), interpolation_points, clip_to_unit=True),
-        _candidate_param_values(base_params.w_back_scale, (0.2, 0.8), interpolation_points),
-        _candidate_param_values(base_params.w_in_scale, (0.02, 0.12), interpolation_points),
-        _candidate_param_values(base_params.w_in_sparsity, (0.3, 0.9), interpolation_points, clip_to_unit=True),
-        _candidate_param_values(base_params.bias_value, (-0.2, 0.2), interpolation_points),
+        _candidate_param_values(base_params.spectral_radius, (0.3, 1.2), interpolation_points),
+        _candidate_param_values(base_params.C, (0.1, 1.0), interpolation_points, clip_to_unit=True),
+        _candidate_param_values(base_params.decay_rate, (0.01, 0.99), interpolation_points, clip_to_unit=True),
+        _candidate_param_values(base_params.w_scale, (0.01, 1.0), interpolation_points),
+        _candidate_param_values(base_params.w_sparsity, (0.5, 0.995), interpolation_points, clip_to_unit=True),
+        _candidate_param_values(base_params.w_back_scale, (0.1, 1.0), interpolation_points),
+        _candidate_param_values(base_params.w_in_scale, (0.02, 1.0), interpolation_points),
+        _candidate_param_values(base_params.w_in_sparsity, (0.1, 0.99), interpolation_points, clip_to_unit=True),
+        _candidate_param_values(base_params.bias_value, (-0.9, 0.9), interpolation_points),
     ]
 
     total_combinations = int(np.prod([axis.size for axis in grid_axes], dtype=np.int64))
