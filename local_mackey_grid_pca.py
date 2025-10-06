@@ -3,10 +3,12 @@
 This script samples hyperparameter configurations uniformly at random within
 the configured ranges, records the resulting 100-step NRMSE scores, and renders
 a weighted PCA projection that emphasizes low-error regions to highlight how
-sparse the performant settings are. Axes automatically stretch when a component
-collapses onto a small set of discrete values, and the plot annotates each PCA
-direction with its dominant parameter loadings. Use ``--smoke-test`` to cap the
-sweep at 2,000 combinations for quick iteration.
+sparse the performant settings are. The plot annotates each PCA direction with
+its dominant parameter loadings. Use ``--smoke-test`` to cap the sweep at 2,000
+samples for quick iteration.
+
+this script is normally launched via local_mackey_grid_pca_batch.sh, any changes
+to command line arguments or script running should be reflected there as well.
 """
 
 from __future__ import annotations
@@ -156,26 +158,19 @@ def _evaluate_combination(task: Tuple[int, Tuple[float, ...]]) -> Tuple[int, Tup
     return index, combo_values, float(nrmse_100)
 
 
-def evaluate_grid(num_samples: int, max_combinations: int | None, max_workers: int, window: Dict) -> Tuple[np.ndarray, np.ndarray]:
+def evaluate_grid(num_samples: int, max_workers: int, window: Dict) -> Tuple[np.ndarray, np.ndarray]:
     """Evaluate random hyperparameter samples in parallel and return (params, scores)."""
     if num_samples <= 0:
         raise ValueError("Number of samples must be positive.")
 
-    total_combinations = num_samples
-    if max_combinations is not None:
-        total_combinations = min(num_samples, max_combinations)
-
-    if total_combinations == 0:
-        raise ValueError("No hyperparameter combinations generated.")
-
     print(
-        f"Evaluating {total_combinations:,} random hyperparameter configurations "
+        f"Evaluating {num_samples:,} random hyperparameter configurations "
         f"with {max_workers} worker(s)."
     )
 
     param_rng = np.random.default_rng(DATA_SEED + 1)
-    params_matrix = _sample_param_matrix(total_combinations, param_rng)
-    scores = np.empty(total_combinations, dtype=np.float64)
+    params_matrix = _sample_param_matrix(num_samples, param_rng)
+    scores = np.empty(num_samples, dtype=np.float64)
 
     combination_iter = iter_param_combinations(params_matrix)
 
@@ -348,15 +343,9 @@ def parse_args() -> argparse.Namespace:
         help="Number of random hyperparameter configurations to evaluate.",
     )
     parser.add_argument(
-        "--max-combinations",
-        type=int,
-        default=None,
-        help="Optional cap on the number of hyperparameter configurations to evaluate.",
-    )
-    parser.add_argument(
         "--smoke-test",
         action="store_true",
-        help="Limit the sweep to 2,000 combinations for a quick smoke test.",
+        help="Limit the sweep to 2,000 samples for a quick smoke test.",
     )
     parser.add_argument(
         "--plot-path",
@@ -384,15 +373,14 @@ def main() -> None:
 
     num_samples = max(1, args.num_samples)
     max_workers = max(1, args.max_workers)
-    max_combinations = args.max_combinations
     if args.smoke_test:
-        max_combinations = 2000 if max_combinations is None else min(max_combinations, 2000)
+        num_samples = min(num_samples, 2000)
 
     rng = np.random.default_rng(DATA_SEED)
     _, series_std = generate_mackey_glass(H=TOTAL_WINDOW_LEN, rng=rng)
     window = build_window(series_std)
 
-    params_matrix, scores = evaluate_grid(num_samples, max_combinations, max_workers, window)
+    params_matrix, scores = evaluate_grid(num_samples, max_workers, window)
 
     ensure_output_dir(args.csv_path)
     save_results_csv(params_matrix, scores, args.csv_path)

@@ -32,7 +32,7 @@ export MKL_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-MAX_COMBINATIONS=${MAX_COMBINATIONS:-200000}
+NUM_SAMPLES=${NUM_SAMPLES:-200000}
 MAX_WORKERS=${MAX_WORKERS:-${SLURM_CPUS_PER_TASK:-1}}
 
 ensure_runs_dir() {
@@ -48,7 +48,7 @@ ensure_runs_dir "$CSV_PATH"
 
 set -x
 python -u local_mackey_grid_pca.py \
-  --max-combinations "$MAX_COMBINATIONS" \
+  --num-samples "$NUM_SAMPLES" \
   --max-workers "$MAX_WORKERS" \
   --plot-path "$PLOT_PATH" \
   --csv-path "$CSV_PATH"
