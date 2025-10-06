@@ -1,3 +1,3 @@
-"""Helper modules for the mixture-of-reservoirs grid-search trainer."""
+"""Helper modules for the mixture-of-reservoirs GA trainer."""
 
 __all__ = []

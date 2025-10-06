@@ -1,4 +1,4 @@
-"""Mixture-of-reservoirs grid-search trainer with oracle routing."""
+"""Mixture-of-reservoirs GA trainer with oracle routing."""
 
 import argparse
 import json
@@ -23,7 +23,7 @@ from moe.gating import (
     serialize_regime_counts,
     serialize_regime_means,
 )
-from moe.hparam_search import em_round_hyperparam_tuning
+from moe.genetic_search import GASettings, GeneticReservoirOptimizer
 from moe.logging import timestamp, write_json
 from moe.readout_em import (
     compute_errors_matrix,
@@ -54,8 +54,6 @@ DIAGNOSTIC_ITERATIONS = {10, 20, 30}
 DIAGNOSTIC_DIRNAME = "free_run_diagnostics"
 
 NUM_TRAINING_ITERATIONS = 50
-HYPERPARAM_INTERPOLATION_POINTS = 8
-HYPERPARAM_SAMPLE_BUDGET = 2000
 
 # Dask cluster defaults (tuned for the EECS preempt partition; tweak as needed).
 DASK_JOBS = int(os.environ.get("ESN_DASK_JOBS", 200))
@@ -189,12 +187,37 @@ def _plot_free_run_diagnostics(iteration: int,
         plt.close(fig)
 
 
+GA_DEFAULT_POPULATION = 2000
+GA_DEFAULT_EXPLORATION_GENS = 8
+GA_DEFAULT_ELITE_FRACTION = 0.1
+GA_DEFAULT_RANDOM_START = 0.4
+GA_DEFAULT_RANDOM_END = 0.05
+GA_DEFAULT_MUTATION_SCALE_START = 1.0
+GA_DEFAULT_MUTATION_SCALE_END = 0.25
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Iterative mixture-of-experts ESN trainer")
     parser.add_argument('--tag', type=str, required=True, help='run identifier for logs and artifacts')
     parser.add_argument('--outdir', type=str, default='runs', help='output directory root (default: runs)')
     parser.add_argument('--iterations', type=int, default=NUM_TRAINING_ITERATIONS,
                         help='number of EM+tuning iterations to run (default: %(default)s)')
+    parser.add_argument('--ga-population', type=int, default=GA_DEFAULT_POPULATION,
+                        help='GA population size per expert (default: %(default)s)')
+    parser.add_argument('--ga-explore-generations', type=int, default=GA_DEFAULT_EXPLORATION_GENS,
+                        help='number of generations run with uniform sampling (default: %(default)s)')
+    parser.add_argument('--ga-elite-fraction', type=float, default=GA_DEFAULT_ELITE_FRACTION,
+                        help='fraction of top candidates retained as elites (default: %(default)s)')
+    parser.add_argument('--ga-random-frac-start', type=float, default=GA_DEFAULT_RANDOM_START,
+                        help='initial random injection fraction after exploration (default: %(default)s)')
+    parser.add_argument('--ga-random-frac-end', type=float, default=GA_DEFAULT_RANDOM_END,
+                        help='final random injection fraction (default: %(default)s)')
+    parser.add_argument('--ga-mutation-scale-start', type=float, default=GA_DEFAULT_MUTATION_SCALE_START,
+                        help='multiplier applied to mutation sigmas at start of exploitation (default: %(default)s)')
+    parser.add_argument('--ga-mutation-scale-end', type=float, default=GA_DEFAULT_MUTATION_SCALE_END,
+                        help='multiplier applied to mutation sigmas at end of run (default: %(default)s)')
+    parser.add_argument('--ga-tournament-size', type=int, default=3,
+                        help='parent selection tournament size (default: %(default)s)')
     return parser.parse_args()
 
 
@@ -207,7 +230,8 @@ def ensure_run_directory(base_dir: Path, tag: str) -> Path:
 def run_training_loop(iterations: int,
                       lam: float,
                       horizon: int,
-                      run_dir: Path) -> None:
+                      run_dir: Path,
+                      ga_settings: GASettings) -> None:
     import time
 
     train_windows = _build_fixed_windows(
@@ -234,6 +258,11 @@ def run_training_loop(iterations: int,
     log_path = run_dir / RUN_LOG_FILENAME
 
     responsibilities_prev: Optional[np.ndarray] = None
+
+    genetic_optimizer = GeneticReservoirOptimizer(
+        num_experts=len(reservoirs),
+        settings=ga_settings,
+    )
 
     try:
         with log_path.open('w') as log_file:
@@ -320,30 +349,29 @@ def run_training_loop(iterations: int,
                         FREE_RUN_DIAGNOSTIC_HORIZON,
                     )
 
-                tuned_params, tuned_errors = em_round_hyperparam_tuning(
-                    reservoirs,
-                    train_windows,
-                    oracle_responsibilities,
+                tuned_params, ga_metrics = genetic_optimizer.iterate(
+                    client=client,
+                    windows=train_windows,
+                    responsibilities=oracle_responsibilities,
                     lam=lam,
                     horizon=horizon,
-                    interpolation_points=HYPERPARAM_INTERPOLATION_POINTS,
-                    candidate_samples=HYPERPARAM_SAMPLE_BUDGET,
-                    client=client,
                     reservoir_seeds=RESERVOIR_SEEDS,
                     N=N,
                     K=K,
                     L=L,
                     task_retries=ESN_DASK_TASK_RETIRES,
-                    dask_jobs=DASK_JOBS,
-                    dask_processes_per_job=DASK_PROCESSES_PER_JOB,
                 )
                 reservoir_param_configs = [ReservoirParams(**vars(p)) for p in tuned_params]
                 reservoirs = _instantiate_reservoirs(reservoir_param_configs, N, K, L)
 
-                print(f"[{iteration_label}] Hyperparameter tuning results (responsibility-weighted NRMSE):")
-                for expert_index, (params, error_value) in enumerate(zip(reservoir_param_configs, tuned_errors)):
+                print(f"[{iteration_label}] Genetic search results (responsibility-weighted NRMSE):")
+                for expert_index, (params, metric) in enumerate(zip(reservoir_param_configs, ga_metrics)):
                     param_summary = {field: round(getattr(params, field), 4) for field in vars(params)}
-                    print(f"  Expert {expert_index}: error={error_value:.4f} params={param_summary}")
+                    print(
+                        f"  Expert {expert_index}: error={metric['best_error']:.4f} "
+                        f"median={metric['median_error']:.4f} random_frac={metric['random_fraction']:.3f} "
+                        f"params={param_summary}"
+                    )
 
                 iteration_record = {
                     'timestamp': timestamp(),
@@ -355,7 +383,7 @@ def run_training_loop(iterations: int,
                     'regime_mean_responsibility': serialize_regime_means(regime_means),
                     'regime_counts': serialize_regime_counts(regime_counts),
                     'post_refit_mean_nrmse': errors_after_refit.mean(axis=0).tolist(),
-                    'tuned_errors': [float(err) for err in tuned_errors],
+                    'ga_metrics': ga_metrics,
                     'tuned_params': [
                         {field: float(getattr(params, field)) for field in vars(params)}
                         for params in reservoir_param_configs
@@ -381,6 +409,19 @@ if __name__ == "__main__":
     base_outdir.mkdir(parents=True, exist_ok=True)
     run_dir = ensure_run_directory(base_outdir, args.tag)
 
+    ga_settings = GASettings(
+        population_size=int(args.ga_population),
+        exploration_generations=int(args.ga_explore_generations),
+        elite_fraction=float(args.ga_elite_fraction),
+        random_injection_start=float(args.ga_random_frac_start),
+        random_injection_end=float(args.ga_random_frac_end),
+        mutation_scale_start=float(args.ga_mutation_scale_start),
+        mutation_scale_end=float(args.ga_mutation_scale_end),
+        total_generations=int(args.iterations),
+        rng_seed=1234,
+        tournament_size=int(args.ga_tournament_size),
+    )
+
     config_snapshot = {
         'tag': args.tag,
         'outdir': str(base_outdir),
@@ -399,6 +440,17 @@ if __name__ == "__main__":
         'epsilon_uniform': {'start': EPSILON_START, 'end': EPSILON_END},
         'lambda_load': {'start': LAMBDA_LOAD_START, 'end': LAMBDA_LOAD_END},
         'horizon': 10,
+        'ga': {
+            'population': ga_settings.population_size,
+            'exploration_generations': ga_settings.exploration_generations,
+            'elite_fraction': ga_settings.elite_fraction,
+            'random_injection_start': ga_settings.random_injection_start,
+            'random_injection_end': ga_settings.random_injection_end,
+            'mutation_scale_start': ga_settings.mutation_scale_start,
+            'mutation_scale_end': ga_settings.mutation_scale_end,
+            'tournament_size': ga_settings.tournament_size,
+            'rng_seed': ga_settings.rng_seed,
+        },
         'dask': {
             'jobs': DASK_JOBS,
             'worker_cores': DASK_WORKER_CORES,
@@ -416,4 +468,5 @@ if __name__ == "__main__":
         lam=1e-3,
         horizon=10,
         run_dir=run_dir,
+        ga_settings=ga_settings,
     )

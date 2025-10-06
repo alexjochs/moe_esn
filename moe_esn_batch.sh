@@ -16,6 +16,14 @@ set -euo pipefail
 TAG=${TAG:-moe-n100-$(date +%Y%m%d-%H%M%S)}
 OUTDIR=${OUTDIR:-$PWD/runs}
 ITERATIONS=${ITERATIONS:-30}
+GA_POPULATION=${GA_POPULATION:-2000}
+GA_EXPLORE_GENERATIONS=${GA_EXPLORE_GENERATIONS:-8}
+GA_ELITE_FRACTION=${GA_ELITE_FRACTION:-0.1}
+GA_RANDOM_FRAC_START=${GA_RANDOM_FRAC_START:-0.4}
+GA_RANDOM_FRAC_END=${GA_RANDOM_FRAC_END:-0.05}
+GA_MUTATION_SCALE_START=${GA_MUTATION_SCALE_START:-1.0}
+GA_MUTATION_SCALE_END=${GA_MUTATION_SCALE_END:-0.25}
+GA_TOURNAMENT_SIZE=${GA_TOURNAMENT_SIZE:-3}
 
 mkdir -p "$OUTDIR"
 
@@ -52,7 +60,15 @@ set -x
 python -u mixture_of_reservoirs.py \
   --outdir "$OUTDIR" \
   --tag "$TAG" \
-  --iterations "$ITERATIONS"
+  --iterations "$ITERATIONS" \
+  --ga-population "$GA_POPULATION" \
+  --ga-explore-generations "$GA_EXPLORE_GENERATIONS" \
+  --ga-elite-fraction "$GA_ELITE_FRACTION" \
+  --ga-random-frac-start "$GA_RANDOM_FRAC_START" \
+  --ga-random-frac-end "$GA_RANDOM_FRAC_END" \
+  --ga-mutation-scale-start "$GA_MUTATION_SCALE_START" \
+  --ga-mutation-scale-end "$GA_MUTATION_SCALE_END" \
+  --ga-tournament-size "$GA_TOURNAMENT_SIZE"
 set +x
 
 scontrol show job "$SLURM_JOB_ID" | egrep "TRES|MinMemoryCPU|NumCPUs|Nodes|Partition|Account" || true
