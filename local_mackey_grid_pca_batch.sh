@@ -33,7 +33,6 @@ export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 MAX_COMBINATIONS=${MAX_COMBINATIONS:-200000}
-INTERPOLATION_POINTS=${INTERPOLATION_POINTS:-5}
 MAX_WORKERS=${MAX_WORKERS:-${SLURM_CPUS_PER_TASK:-1}}
 
 ensure_runs_dir() {
@@ -49,7 +48,6 @@ ensure_runs_dir "$CSV_PATH"
 
 set -x
 python -u local_mackey_grid_pca.py \
-  --interpolation-points "$INTERPOLATION_POINTS" \
   --max-combinations "$MAX_COMBINATIONS" \
   --max-workers "$MAX_WORKERS" \
   --plot-path "$PLOT_PATH" \

@@ -1,23 +1,22 @@
 """Parallel hyperparameter landscape visualizer for the Mackey-Glass ESN.
 
-This script evaluates every combination from linspace-generated hyperparameter
-grids, records the resulting 100-step NRMSE scores, and renders a weighted PCA
-projection that emphasizes low-error regions to highlight how sparse the
-performant settings are. Axes automatically stretch when a component collapses
-onto a small set of discrete values, and the plot annotates each PCA direction
-with its dominant parameter loadings. Use ``--smoke-test`` to cap the sweep at
-2,000 combinations for quick iteration.
+This script samples hyperparameter configurations uniformly at random within
+the configured ranges, records the resulting 100-step NRMSE scores, and renders
+a weighted PCA projection that emphasizes low-error regions to highlight how
+sparse the performant settings are. Axes automatically stretch when a component
+collapses onto a small set of discrete values, and the plot annotates each PCA
+direction with its dominant parameter loadings. Use ``--smoke-test`` to cap the
+sweep at 2,000 combinations for quick iteration.
 """
 
 from __future__ import annotations
 
 import argparse
-import itertools
 import math
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import Dict, Iterator, List, Sequence, Tuple
+from typing import Dict, Iterator, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -46,8 +45,8 @@ RIDGE_ALPHA = 1e-4
 DATA_SEED = 31415
 BASE_RESERVOIR_SEED = 9000
 
-# Hyperparameter grid configuration
-INTERPOLATION_POINTS = 5
+# Hyperparameter sampling configuration
+DEFAULT_NUM_SAMPLES = 5000
 
 # NRMSE thresholds for coloring
 THRESH_RED = 0.5
@@ -96,13 +95,19 @@ def build_window(series: np.ndarray) -> Dict:
         "id": "mackey_glass_window",
     }
 
+def _sample_param_matrix(total_samples: int, rng: np.random.Generator) -> np.ndarray:
+    """Draw ``total_samples`` random configurations within the parameter ranges."""
+    if total_samples <= 0:
+        raise ValueError("Number of parameter samples must be positive.")
 
-def _linspace_axis(key: str, points: int) -> np.ndarray:
-    lo, hi, clip = PARAM_RANGES[key]
-    axis = np.linspace(lo, hi, points, dtype=np.float64)
-    if clip:
-        axis = np.clip(axis, 0.0, 1.0)
-    return axis
+    matrix = np.empty((total_samples, len(PARAM_KEYS)), dtype=np.float64)
+    for column, key in enumerate(PARAM_KEYS):
+        lo, hi, clip = PARAM_RANGES[key]
+        samples = rng.uniform(lo, hi, size=total_samples)
+        if clip:
+            samples = np.clip(samples, 0.0, 1.0)
+        matrix[:, column] = samples
+    return matrix
 
 
 _WINDOW: Dict | None = None
@@ -118,13 +123,10 @@ def _worker_init(window: Dict) -> None:
     _FIT_END = int(window["idx_fit_end"])
 
 
-def iter_param_combinations(points: int, max_combinations: int | None, axes: Sequence[np.ndarray]) -> Iterator[Tuple[int, Tuple[float, ...]]]:
-    """Yield ``(index, values)`` pairs for every hyperparameter combination."""
-    product_iter = itertools.product(*axes)
-    for index, combo in enumerate(product_iter):
-        if max_combinations is not None and index >= max_combinations:
-            break
-        yield index, tuple(float(value) for value in combo)
+def iter_param_combinations(params_matrix: np.ndarray) -> Iterator[Tuple[int, Tuple[float, ...]]]:
+    """Yield ``(index, values)`` pairs for each sampled hyperparameter tuple."""
+    for index in range(params_matrix.shape[0]):
+        yield index, tuple(float(value) for value in params_matrix[index])
 
 
 def _evaluate_combination(task: Tuple[int, Tuple[float, ...]]) -> Tuple[int, Tuple[float, ...], float]:
@@ -154,29 +156,31 @@ def _evaluate_combination(task: Tuple[int, Tuple[float, ...]]) -> Tuple[int, Tup
     return index, combo_values, float(nrmse_100)
 
 
-def evaluate_grid(points: int, max_combinations: int | None, max_workers: int, window: Dict) -> Tuple[np.ndarray, np.ndarray]:
-    """Evaluate the hyperparameter grid in parallel and return (params, scores)."""
-    axes = [_linspace_axis(key, points) for key in PARAM_KEYS]
-    total_combinations = int(np.prod([axis.size for axis in axes], dtype=np.int64))
+def evaluate_grid(num_samples: int, max_combinations: int | None, max_workers: int, window: Dict) -> Tuple[np.ndarray, np.ndarray]:
+    """Evaluate random hyperparameter samples in parallel and return (params, scores)."""
+    if num_samples <= 0:
+        raise ValueError("Number of samples must be positive.")
+
+    total_combinations = num_samples
     if max_combinations is not None:
-        total_combinations = min(total_combinations, max_combinations)
+        total_combinations = min(num_samples, max_combinations)
 
     if total_combinations == 0:
         raise ValueError("No hyperparameter combinations generated.")
 
     print(
-        f"Evaluating {total_combinations:,} hyperparameter combinations "
-        f"with {max_workers} worker(s); {points} interpolation points per axis."
+        f"Evaluating {total_combinations:,} random hyperparameter configurations "
+        f"with {max_workers} worker(s)."
     )
 
-    params_matrix = np.empty((total_combinations, len(PARAM_KEYS)), dtype=np.float64)
+    param_rng = np.random.default_rng(DATA_SEED + 1)
+    params_matrix = _sample_param_matrix(total_combinations, param_rng)
     scores = np.empty(total_combinations, dtype=np.float64)
 
-    combination_iter = iter_param_combinations(points, total_combinations, axes)
+    combination_iter = iter_param_combinations(params_matrix)
 
     with ProcessPoolExecutor(max_workers=max_workers, initializer=_worker_init, initargs=(window,)) as executor:
-        for index, combo_values, score in executor.map(_evaluate_combination, combination_iter, chunksize=32):
-            params_matrix[index, :] = np.fromiter(combo_values, dtype=np.float64, count=len(PARAM_KEYS))
+        for index, _, score in executor.map(_evaluate_combination, combination_iter, chunksize=32):
             scores[index] = score
 
     return params_matrix, scores
@@ -264,41 +268,6 @@ def save_results_csv(params: np.ndarray, scores: np.ndarray, csv_path: Path) -> 
     np.savetxt(csv_path, data, delimiter=",", header=header, comments="")
 
 
-def _stretch_axis(
-    values: np.ndarray,
-    max_unique: int,
-) -> Tuple[np.ndarray, bool, np.ndarray | None, np.ndarray | None]:
-    """Spread discrete coordinates across ``[-0.5, 0.5]`` while keeping order."""
-    if values.size == 0:
-        return values, False, None, None
-
-    rounded_values = np.round(values, decimals=8)
-    unique_codes = np.unique(rounded_values)
-    unique_count = unique_codes.size
-
-    if unique_count <= 1:
-        center_value = float(values.mean())
-        stretched = np.zeros_like(values)
-        return stretched, True, np.array([0.0]), np.array([center_value])
-
-    if unique_count > max_unique:
-        return values, False, None, None
-
-    sorted_codes = np.sort(unique_codes)
-    targets = np.linspace(-0.5, 0.5, unique_count)
-    code_to_target = {code: target for code, target in zip(sorted_codes, targets)}
-
-    stretched = np.empty_like(values)
-    tick_labels = np.empty(unique_count, dtype=np.float64)
-
-    for idx, code in enumerate(sorted_codes):
-        mask = np.isclose(rounded_values, code)
-        stretched[mask] = targets[idx]
-        tick_labels[idx] = float(values[mask].mean())
-
-    return stretched, True, targets, tick_labels
-
-
 def _format_component_loadings(basis: np.ndarray, top_k: int = 4) -> str:
     lines: List[str] = []
     for component_index in range(basis.shape[1]):
@@ -314,30 +283,15 @@ def render_pca_plot(
     scores: np.ndarray,
     plot_path: Path,
     basis: np.ndarray,
-    interpolation_points: int,
 ) -> None:
     """Render and save the PCA scatter plot with color-coded scores."""
     ensure_output_dir(plot_path)
     colors, sizes, red_mask = map_colors(scores)
 
-    stretched = pca_points.copy()
-    (
-        stretched[:, 0],
-        x_was_stretched,
-        x_tick_positions,
-        x_tick_labels,
-    ) = _stretch_axis(stretched[:, 0], interpolation_points)
-    (
-        stretched[:, 1],
-        y_was_stretched,
-        y_tick_positions,
-        y_tick_labels,
-    ) = _stretch_axis(stretched[:, 1], interpolation_points)
-
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.scatter(
-        stretched[:, 0],
-        stretched[:, 1],
+        pca_points[:, 0],
+        pca_points[:, 1],
         c=colors,
         s=sizes,
         linewidths=0.2,
@@ -347,8 +301,8 @@ def render_pca_plot(
 
     if np.any(red_mask):
         ax.scatter(
-            stretched[red_mask, 0],
-            stretched[red_mask, 1],
+            pca_points[red_mask, 0],
+            pca_points[red_mask, 1],
             facecolors="none",
             edgecolors="black",
             linewidths=1.0,
@@ -359,19 +313,6 @@ def render_pca_plot(
     ax.set_ylabel("PCA2")
     ax.set_title("Mackey-Glass Reservoir Hyperparameter Landscape (NRMSE_100)")
     ax.grid(alpha=0.2)
-
-    if x_was_stretched and x_tick_positions is not None and x_tick_positions.size > 1:
-        padding = 0.08 if x_tick_positions.size > 2 else 0.12
-        ax.set_xlim(x_tick_positions.min() - padding, x_tick_positions.max() + padding)
-        ax.set_xticks(x_tick_positions)
-        if x_tick_labels is not None:
-            ax.set_xticklabels([f"{label:.2f}" for label in x_tick_labels])
-    if y_was_stretched and y_tick_positions is not None and y_tick_positions.size > 1:
-        padding = 0.08 if y_tick_positions.size > 2 else 0.12
-        ax.set_ylim(y_tick_positions.min() - padding, y_tick_positions.max() + padding)
-        if y_tick_labels is not None:
-            ax.set_yticks(y_tick_positions)
-            ax.set_yticklabels([f"{label:.2f}" for label in y_tick_labels])
 
     legend_elements = [
         plt.Line2D([0], [0], marker="o", color="w", label="NRMSE < 0.5", markerfacecolor="#d73027", markeredgecolor="black", markersize=9),
@@ -401,16 +342,16 @@ def render_pca_plot(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize Mackey-Glass hyperparameter landscape via PCA.")
     parser.add_argument(
-        "--interpolation-points",
+        "--num-samples",
         type=int,
-        default=INTERPOLATION_POINTS,
-        help="Number of linspace points per hyperparameter axis.",
+        default=DEFAULT_NUM_SAMPLES,
+        help="Number of random hyperparameter configurations to evaluate.",
     )
     parser.add_argument(
         "--max-combinations",
         type=int,
         default=None,
-        help="Optional cap on the number of hyperparameter combinations to evaluate.",
+        help="Optional cap on the number of hyperparameter configurations to evaluate.",
     )
     parser.add_argument(
         "--smoke-test",
@@ -441,7 +382,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    points = max(2, args.interpolation_points)
+    num_samples = max(1, args.num_samples)
     max_workers = max(1, args.max_workers)
     max_combinations = args.max_combinations
     if args.smoke_test:
@@ -451,7 +392,7 @@ def main() -> None:
     _, series_std = generate_mackey_glass(H=TOTAL_WINDOW_LEN, rng=rng)
     window = build_window(series_std)
 
-    params_matrix, scores = evaluate_grid(points, max_combinations, max_workers, window)
+    params_matrix, scores = evaluate_grid(num_samples, max_combinations, max_workers, window)
 
     ensure_output_dir(args.csv_path)
     save_results_csv(params_matrix, scores, args.csv_path)
@@ -462,7 +403,7 @@ def main() -> None:
     component_summary = _format_component_loadings(pca_basis)
     print("PCA component loadings:\n" + component_summary)
 
-    render_pca_plot(pca_points, scores, args.plot_path, pca_basis, points)
+    render_pca_plot(pca_points, scores, args.plot_path, pca_basis)
 
 
 if __name__ == "__main__":
