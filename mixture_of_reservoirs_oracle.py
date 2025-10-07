@@ -44,12 +44,12 @@ rng = np.random.default_rng(42)
 # Dataset windowing
 #   Window spec: [warmup | teacher-forced fit | eval (free-run)]
 # -----------------------------------------------------------------------------
-WARMUP_LEN = 200                # warmup length
-TEACHER_FORCED_LEN = 1000           # teacher-forced fit span; set to 0 to disable
+WARMUP_LEN = 300                # warmup length
+TEACHER_FORCED_LEN = 3000           # teacher-forced fit span; set to 0 to disable
 MAX_EVAL_HORIZON = 50               # extra tail so free-run rollouts have targets
 N_WINDOWS_PER_REGIME = 1
 
-FREE_RUN_DIAGNOSTIC_HORIZON = 500
+FREE_RUN_DIAGNOSTIC_HORIZON = 400
 DIAGNOSTIC_ITERATIONS = {10, 20, 30}
 DIAGNOSTIC_DIRNAME = "free_run_diagnostics"
 
@@ -102,7 +102,7 @@ def _linear_anneal(start: float, end: float, it: int, it0: int, it1: int) -> flo
 # Model dimensions (shared across experts)
 # -----------------------------------------------------------------------------
 K = 1   # number of input units
-N = 100 # number of reservoir units
+N = 500 # number of reservoir units
 L = 1   # number of output units
 
 REGIME_TO_ORACLE_EXPERT: Dict[int, int] = {
