@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -24,6 +25,14 @@ PARAM_BOUNDS: Dict[str, Tuple[float, float]] = {
     "w_in_sparsity": (0.1, 0.99),
     "bias_value": (-0.9, 0.9),
 }
+
+_MAX_IN_FLIGHT_ENV = os.environ.get("ESN_MAX_INFLIGHT_EVALS", "1000")
+try:
+    _parsed = int(_MAX_IN_FLIGHT_ENV)
+except ValueError:
+    MAX_IN_FLIGHT_EVALS: Optional[int] = 1000
+else:
+    MAX_IN_FLIGHT_EVALS = _parsed if _parsed > 0 else None
 
 # Per-parameter mutation widths are expressed as a fraction of the allowed range.
 MUTATION_FRACTION_START: Dict[str, float] = {
@@ -175,6 +184,14 @@ class GeneticReservoirOptimizer:
                 ExpertState(rng=np.random.default_rng(int(state_seed)))
             )
 
+        if MAX_IN_FLIGHT_EVALS is None:
+            self.max_inflight_evaluations = None
+        else:
+            self.max_inflight_evaluations = max(
+                1,
+                min(self.population_size, MAX_IN_FLIGHT_EVALS),
+            )
+
         self.mutation_sigma_start = {
             name: (bounds[1] - bounds[0]) * mutation_fraction_start[name]
             for name, bounds in param_bounds.items()
@@ -242,38 +259,50 @@ class GeneticReservoirOptimizer:
         state = self.states[expert_index]
         population = self._ensure_population(state)
 
-        futures = []
         reservoir_seed = reservoir_seeds[expert_index % len(reservoir_seeds)]
-        for candidate_index, candidate in enumerate(population):
-            eval_seed = (
-                reservoir_seed
-                + 7919 * (state.generation + 1)
-                + 217 * candidate_index
-            )
-            future = client.submit(
-                _evaluate_reservoir_candidate,
-                expert_index,
-                candidate,
-                windows_future,
-                responsibility_future,
-                lam,
-                horizon,
-                int(eval_seed),
-                N,
-                K,
-                L,
-                resources={"reservoir_eval": 1},
-                retries=task_retries,
-                pure=False,
-            )
-            futures.append(future)
+        population_size = len(population)
+        chunk_limit = self.max_inflight_evaluations or population_size
+        chunk_size = max(1, min(population_size, chunk_limit))
+        candidate_errors_buffer = np.empty(population_size, dtype=np.float64)
 
-        candidate_errors = np.asarray(client.gather(futures), dtype=np.float64)
+        for start in range(0, population_size, chunk_size):
+            stop = min(population_size, start + chunk_size)
+            chunk_futures = []
+            for candidate_index in range(start, stop):
+                candidate = population[candidate_index]
+                eval_seed = (
+                    reservoir_seed
+                    + 7919 * (state.generation + 1)
+                    + 217 * candidate_index
+                )
+                chunk_futures.append(
+                    client.submit(
+                        _evaluate_reservoir_candidate,
+                        expert_index,
+                        candidate,
+                        windows_future,
+                        responsibility_future,
+                        lam,
+                        horizon,
+                        int(eval_seed),
+                        N,
+                        K,
+                        L,
+                        resources={"reservoir_eval": 1},
+                        retries=task_retries,
+                        pure=False,
+                    )
+                )
+            try:
+                errors_chunk = client.gather(chunk_futures)
+            finally:
+                client.cancel(chunk_futures, force=True)
+            candidate_errors_buffer[start:stop] = errors_chunk
+
+        candidate_errors = candidate_errors_buffer
         best_index = int(np.argmin(candidate_errors))
         best_error = float(candidate_errors[best_index])
         median_error = float(np.median(candidate_errors))
-
-        client.cancel(futures, force=True)
 
         random_fraction, sigma_values = self._prepare_next_generation(
             state,

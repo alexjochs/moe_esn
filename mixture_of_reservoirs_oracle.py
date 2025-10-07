@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import resource
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -187,6 +188,14 @@ def _plot_free_run_diagnostics(iteration: int,
         plt.close(fig)
 
 
+def _maybe_log_orchestrator_rss(label: str) -> None:
+    if os.environ.get("ESN_LOG_ORCHESTRATOR_RSS", "0") != "1":
+        return
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    rss_gb = usage.ru_maxrss / float(1024 ** 2)
+    print(f"[{label}] Max RSS so far ≈ {rss_gb:.2f} GB")
+
+
 GA_DEFAULT_POPULATION = 2000
 GA_DEFAULT_EXPLORATION_GENS = 8
 GA_DEFAULT_ELITE_FRACTION = 0.1
@@ -349,6 +358,7 @@ def run_training_loop(iterations: int,
                         FREE_RUN_DIAGNOSTIC_HORIZON,
                     )
 
+                _maybe_log_orchestrator_rss(f"{iteration_label} before GA submit")
                 tuned_params, ga_metrics = genetic_optimizer.iterate(
                     client=client,
                     windows=train_windows,
@@ -361,6 +371,7 @@ def run_training_loop(iterations: int,
                     L=L,
                     task_retries=ESN_DASK_TASK_RETIRES,
                 )
+                _maybe_log_orchestrator_rss(f"{iteration_label} after GA gather")
                 reservoir_param_configs = [ReservoirParams(**vars(p)) for p in tuned_params]
                 reservoirs = _instantiate_reservoirs(reservoir_param_configs, N, K, L)
 
