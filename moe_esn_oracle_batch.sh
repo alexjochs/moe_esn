@@ -5,6 +5,8 @@
 #SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=64G
 #SBATCH --output=%x-n100-%j.out
 #SBATCH --error=%x-n100-%j.err
 #SBATCH --mail-type=ALL
