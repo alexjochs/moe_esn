@@ -16,7 +16,7 @@ import numpy as np
 from dataset import Regime
 from reservoir import Reservoir, ReservoirParams
 
-from moe.data_windows import _build_fixed_windows, _gen_regime_window
+from moe.data_windows import _gen_regime_window
 from moe.dask_utils import start_dask_client
 from moe.gating import (
     compute_responsibilities_with_regularization,
@@ -45,10 +45,9 @@ rng = np.random.default_rng(42)
 #   Window spec: [warmup | teacher-forced fit | eval (free-run)]
 # -----------------------------------------------------------------------------
 WARMUP_LEN = 200                # warmup length
-TEACHER_FORCED_LEN = 300            # teacher-forced fit span; set to 0 to disable
+TEACHER_FORCED_LEN = 1000           # teacher-forced fit span; set to 0 to disable
 MAX_EVAL_HORIZON = 50               # extra tail so free-run rollouts have targets
-WINDOW_LEN_TOTAL = WARMUP_LEN + TEACHER_FORCED_LEN + MAX_EVAL_HORIZON
-N_WINDOWS_PER_REGIME = 200
+N_WINDOWS_PER_REGIME = 1
 
 FREE_RUN_DIAGNOSTIC_HORIZON = 500
 DIAGNOSTIC_ITERATIONS = {10, 20, 30}
@@ -111,6 +110,34 @@ REGIME_TO_ORACLE_EXPERT: Dict[int, int] = {
     int(Regime.ROSSLER): 1,
     int(Regime.LORENZ): 2,
 }
+
+
+def _build_overfit_windows(n_per_regime: int,
+                           rng: np.random.Generator,
+                           warmup_len: int,
+                           teacher_forced_len: int,
+                           eval_tail_len: int) -> List[Dict]:
+    """Return ``n_per_regime`` windows per regime with shared train/eval segments."""
+    total_length = warmup_len + teacher_forced_len + eval_tail_len
+    windows: List[Dict] = []
+    uid = 0
+    for regime_number in (
+        int(Regime.MACKEY_GLASS),
+        int(Regime.ROSSLER),
+        int(Regime.LORENZ),
+    ):
+        for _ in range(n_per_regime):
+            y = _gen_regime_window(regime_number, total_length, rng)
+            windows.append({
+                'y': y,
+                'idx_warmup_end': warmup_len,
+                'idx_fit_end': warmup_len + teacher_forced_len,
+                'idx_eval_end': total_length,
+                'regime': regime_number,
+                'id': f'overfit_{uid}',
+            })
+            uid += 1
+    return windows
 
 
 def _build_oracle_responsibilities(windows: List[Dict], num_experts: int) -> np.ndarray:
@@ -243,12 +270,12 @@ def run_training_loop(iterations: int,
                       ga_settings: GASettings) -> None:
     import time
 
-    train_windows = _build_fixed_windows(
+    train_windows = _build_overfit_windows(
         N_WINDOWS_PER_REGIME,
         rng,
         WARMUP_LEN,
         TEACHER_FORCED_LEN,
-        WINDOW_LEN_TOTAL,
+        MAX_EVAL_HORIZON,
     )
     reservoir_param_configs, reservoirs = reset_reservoir_bank(N, K, L)
     diagnostic_windows = _build_diagnostic_windows(FREE_RUN_DIAGNOSTIC_HORIZON)
