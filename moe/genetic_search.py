@@ -87,6 +87,12 @@ class ExpertState:
     last_mutation_sigmas: Dict[str, float] = field(default_factory=dict)
 
 
+@dataclass
+class ReservoirSelection:
+    params: ReservoirParams
+    rng_seed: int
+
+
 def _evaluate_reservoir_candidate(
     reservoir_index: int,
     params: ReservoirParams,
@@ -227,16 +233,16 @@ class GeneticReservoirOptimizer:
         K: int,
         L: int,
         task_retries: int,
-    ) -> Tuple[List[ReservoirParams], List[Dict[str, float]]]:
+    ) -> Tuple[List[ReservoirSelection], List[Dict[str, float]]]:
         """Advance every expert population by one GA evaluation round."""
         windows_future = client.scatter(windows, broadcast=True)
-        best_params: List[ReservoirParams] = []
+        best_candidates: List[ReservoirSelection] = []
         metrics: List[Dict[str, float]] = []
 
         for expert_index in range(self.num_experts):
             responsibility_vector = responsibilities[:, expert_index].astype(np.float32)
             responsibility_future = client.scatter(responsibility_vector, broadcast=True)
-            params, info = self._evaluate_expert(
+            selection, info = self._evaluate_expert(
                 expert_index,
                 client,
                 windows_future,
@@ -250,11 +256,11 @@ class GeneticReservoirOptimizer:
                 task_retries,
             )
             client.cancel(responsibility_future)
-            best_params.append(params)
+            best_candidates.append(selection)
             metrics.append(info)
 
         client.cancel(windows_future)
-        return best_params, metrics
+        return best_candidates, metrics
 
     def _evaluate_expert(
         self,
@@ -269,7 +275,7 @@ class GeneticReservoirOptimizer:
         K: int,
         L: int,
         task_retries: int,
-    ) -> Tuple[ReservoirParams, Dict[str, float]]:
+    ) -> Tuple[ReservoirSelection, Dict[str, float]]:
         state = self.states[expert_index]
         population = self._ensure_population(state)
 
@@ -278,6 +284,7 @@ class GeneticReservoirOptimizer:
         chunk_limit = self.max_inflight_evaluations or population_size
         chunk_size = max(1, min(population_size, chunk_limit))
         candidate_errors_buffer = np.empty(population_size, dtype=np.float64)
+        candidate_seeds_buffer = np.empty(population_size, dtype=np.int64)
 
         for start in range(0, population_size, chunk_size):
             stop = min(population_size, start + chunk_size)
@@ -289,6 +296,8 @@ class GeneticReservoirOptimizer:
                     + 7919 * (state.generation + 1)
                     + 217 * candidate_index
                 )
+                # store seed so the winning candidate can be reproduced later
+                candidate_seeds_buffer[candidate_index] = int(eval_seed)
                 chunk_futures.append(
                     client.submit(
                         _evaluate_reservoir_candidate,
@@ -317,6 +326,7 @@ class GeneticReservoirOptimizer:
         best_index = int(np.argmin(candidate_errors))
         best_error = float(candidate_errors[best_index])
         median_error = float(np.median(candidate_errors))
+        best_seed = int(candidate_seeds_buffer[best_index])
 
         random_fraction, sigma_values = self._prepare_next_generation(
             state,
@@ -332,9 +342,10 @@ class GeneticReservoirOptimizer:
             "random_fraction": float(random_fraction),
             "mutation_sigma_mean": float(np.mean(list(sigma_values.values()))) if sigma_values else 0.0,
             "population_size": float(len(population)),
+            "best_rng_seed": best_seed,
         }
         state.generation += 1
-        return best_params, metrics
+        return ReservoirSelection(params=best_params, rng_seed=best_seed), metrics
 
     def _ensure_population(self, state: ExpertState) -> List[ReservoirParams]:
         if not state.population:
@@ -479,4 +490,5 @@ __all__ = [
     "GASettings",
     "GeneticReservoirOptimizer",
     "PARAM_BOUNDS",
+    "ReservoirSelection",
 ]

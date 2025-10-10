@@ -46,7 +46,7 @@ rng = np.random.default_rng(42)
 # -----------------------------------------------------------------------------
 WARMUP_LEN = 300                # warmup length
 TEACHER_FORCED_LEN = 3000           # teacher-forced fit span; set to 0 to disable
-MAX_EVAL_HORIZON = 50               # extra tail so free-run rollouts have targets
+MAX_EVAL_HORIZON = 150              # extra tail so free-run rollouts have targets
 N_WINDOWS_PER_REGIME = 1
 
 FREE_RUN_DIAGNOSTIC_HORIZON = 400
@@ -386,7 +386,7 @@ def run_training_loop(iterations: int,
                     )
 
                 _maybe_log_orchestrator_rss(f"{iteration_label} before GA submit")
-                tuned_params, ga_metrics = genetic_optimizer.iterate(
+                tuned_candidates, ga_metrics = genetic_optimizer.iterate(
                     client=client,
                     windows=train_windows,
                     responsibilities=oracle_responsibilities,
@@ -399,16 +399,22 @@ def run_training_loop(iterations: int,
                     task_retries=ESN_DASK_TASK_RETIRES,
                 )
                 _maybe_log_orchestrator_rss(f"{iteration_label} after GA gather")
-                reservoir_param_configs = [ReservoirParams(**vars(p)) for p in tuned_params]
-                reservoirs = _instantiate_reservoirs(reservoir_param_configs, N, K, L)
+                reservoir_param_configs = [
+                    ReservoirParams(**vars(selection.params))
+                    for selection in tuned_candidates
+                ]
+                reservoir_seeds = [int(selection.rng_seed) for selection in tuned_candidates]
+                reservoirs = _instantiate_reservoirs(reservoir_param_configs, N, K, L, seeds=reservoir_seeds)
 
                 print(f"[{iteration_label}] Genetic search results (responsibility-weighted NRMSE):")
-                for expert_index, (params, metric) in enumerate(zip(reservoir_param_configs, ga_metrics)):
+                for expert_index, (selection, params, metric) in enumerate(
+                    zip(tuned_candidates, reservoir_param_configs, ga_metrics)
+                ):
                     param_summary = {field: round(getattr(params, field), 4) for field in vars(params)}
                     print(
                         f"  Expert {expert_index}: error={metric['best_error']:.4f} "
                         f"median={metric['median_error']:.4f} random_frac={metric['random_fraction']:.3f} "
-                        f"params={param_summary}"
+                        f"seed={selection.rng_seed} params={param_summary}"
                     )
 
                 iteration_record = {
@@ -423,8 +429,11 @@ def run_training_loop(iterations: int,
                     'post_refit_mean_nrmse': errors_after_refit.mean(axis=0).tolist(),
                     'ga_metrics': ga_metrics,
                     'tuned_params': [
-                        {field: float(getattr(params, field)) for field in vars(params)}
-                        for params in reservoir_param_configs
+                        {
+                            **{field: float(getattr(params, field)) for field in vars(params)},
+                            'rng_seed': int(reservoir_seeds[idx]),
+                        }
+                        for idx, params in enumerate(reservoir_param_configs)
                     ],
                     'tau_cur': float(tau_cur),
                     'eps_uniform': float(eps_cur),
@@ -477,7 +486,7 @@ if __name__ == "__main__":
         'tau': {'start': TAU_START, 'end': TAU_END, 'anneal_iters': [ANNEAL_START_ITER, ANNEAL_END_ITER]},
         'epsilon_uniform': {'start': EPSILON_START, 'end': EPSILON_END},
         'lambda_load': {'start': LAMBDA_LOAD_START, 'end': LAMBDA_LOAD_END},
-        'horizon': 10,
+        'horizon': 100,
         'ga': {
             'population': ga_settings.population_size,
             'exploration_generations': ga_settings.exploration_generations,
@@ -504,7 +513,7 @@ if __name__ == "__main__":
     run_training_loop(
         iterations=int(args.iterations),
         lam=1e-3,
-        horizon=10,
+        horizon=100,
         run_dir=run_dir,
         ga_settings=ga_settings,
     )
