@@ -23,12 +23,12 @@ from single_reservoir_core import fit_linear_readout, teacher_forced_states
 
 # Reservoir dimensions
 INPUT_DIM = 1
-RESERVOIR_SIZE = 100
+RESERVOIR_SIZE = 400
 OUTPUT_DIM = 1
 
 # Window specification (mirrors mixture_of_reservoirs defaults)
-WARMUP_LEN = 200
-TEACHER_FORCED_LEN = 1000
+WARMUP_LEN = 500
+TEACHER_FORCED_LEN = 3000
 FREE_RUN_HORIZON = 500
 NRMSE_HORIZON = 100
 
@@ -39,7 +39,7 @@ RIDGE_ALPHA = 1e-4
 DATA_SEED = 31415
 BASE_RESERVOIR_SEED = 9000
 
-NRMSE_THRERSHOLD = 0.1 # value a reservoir needs to be under to be visualized
+NRMSE_THRERSHOLD = 0.5 # value a reservoir needs to be under to be visualized
 
 BASE_PARAMS = ReservoirParams(**vars(RESERVOIR_PARAM_DEFAULTS[0]))
 PARAM_KEYS: List[str] = [

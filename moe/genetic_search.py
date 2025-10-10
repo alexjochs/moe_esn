@@ -26,6 +26,10 @@ PARAM_BOUNDS: Dict[str, Tuple[float, float]] = {
     "bias_value": (-0.9, 0.9),
 }
 
+ENERGY_EPS = 1e-6
+ENERGY_PENALTY_MIN = 0.5
+ENERGY_PENALTY_MAX = 20.0
+
 _MAX_IN_FLIGHT_ENV = os.environ.get("ESN_MAX_INFLIGHT_EVALS", "1000")
 try:
     _parsed = int(_MAX_IN_FLIGHT_ENV)
@@ -137,6 +141,16 @@ def _evaluate_reservoir_candidate(
             weight = 1.0
         y_hat, y_true = candidate_reservoir.free_run(window, W_out, horizon=horizon)
         error_value = compute_nrmse(y_hat, y_true)
+
+        y_hat_flat = y_hat.reshape(-1)
+        y_true_flat = y_true.reshape(-1)
+        # penalize flat line predictions 
+        predicted_energy = float(np.mean((y_hat_flat - y_hat_flat.mean()) ** 2))
+        target_energy = float(np.mean((y_true_flat - y_true_flat.mean()) ** 2))
+        energy_ratio = target_energy / max(predicted_energy, ENERGY_EPS)
+        penalty = float(np.clip(energy_ratio, ENERGY_PENALTY_MIN, ENERGY_PENALTY_MAX))
+        error_value *= penalty
+
         errors.append(error_value)
         error_weights.append(weight)
 
@@ -336,11 +350,29 @@ class GeneticReservoirOptimizer:
         fitness: np.ndarray,
     ) -> Tuple[float, Dict[str, float]]:
         next_generation_index = state.generation + 1
+        best_index = int(np.argmin(fitness)) if len(population) > 0 else 0
+        best_candidate = population[best_index] if population else None
+
         if next_generation_index <= self.exploration_generations:
-            state.population = [
-                self._sample_uniform(state.rng) for _ in range(self.population_size)
+            # Preserve the strongest candidate even while resampling the rest.
+            preserved_best = (
+                ReservoirParams(**vars(best_candidate))
+                if best_candidate is not None
+                else self._sample_uniform(state.rng)
+            )
+            random_count = max(0, self.population_size - 1)
+            random_members = [
+                self._sample_uniform(state.rng) for _ in range(random_count)
             ]
-            state.last_random_fraction = 1.0
+            state.population = [preserved_best, *random_members]
+            if len(state.population) < self.population_size:
+                state.population.extend(
+                    self._sample_uniform(state.rng)
+                    for _ in range(self.population_size - len(state.population))
+                )
+            state.last_random_fraction = (
+                0.0 if self.population_size <= 1 else (self.population_size - 1) / self.population_size
+            )
             state.last_mutation_sigmas = {}
             return state.last_random_fraction, state.last_mutation_sigmas
 
