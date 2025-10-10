@@ -63,8 +63,21 @@ def start_dask_client(run_dir: Path,
         cluster.scale(jobs=target_jobs)
         client = Client(cluster)
         try:
-            expected_workers = target_jobs * processes_per_job
-            client.wait_for_workers(n_workers=expected_workers, timeout=600)
+            expected_workers = max(1, target_jobs * processes_per_job)
+            min_required = min(
+                expected_workers,
+                max(1, int(os.environ.get("ESN_DASK_MIN_CONNECTED_WORKERS", 10))),
+            )
+            client.wait_for_workers(n_workers=min_required, timeout=600)
+            connected = len(client.scheduler_info().get("workers", {}))
+            if connected < min_required:
+                raise RuntimeError(
+                    f"Connected {connected} workers, fewer than required minimum {min_required}."
+                )
+            if connected < expected_workers:
+                print(
+                    f"[Dask] Connected {connected}/{expected_workers} workers; remaining workers will attach as resources become available."
+                )
         except Exception:
             cluster.close()
             raise
